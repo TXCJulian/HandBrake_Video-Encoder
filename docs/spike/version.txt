@@ -1,0 +1,9 @@
+[04:31:19] Compile-time hardening features are enabled
+Cannot load libnvidia-encode.so.1
+[04:31:19] vcn: not available on this system
+[04:31:19] qsv: not available on this system
+[04:31:19] hb_init: starting libhb thread
+[04:31:19] thread 727905d4d6c0 started ("libhb")
+HandBrake has exited.
+HandBrake 1.9.2
+

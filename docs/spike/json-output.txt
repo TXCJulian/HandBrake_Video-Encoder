@@ -1,0 +1,40 @@
+Version: {
+    "Arch": "x86_64",
+    "Name": "HandBrake",
+    "Official": true,
+    "RepoDate": "2025-02-20 18:37:15",
+    "RepoHash": "e117cfe7fca37abeec59ea4201e5d93ed7477746",
+    "System": "Linux",
+    "Type": "release",
+    "Version": {
+        "Major": 1,
+        "Minor": 9,
+        "Point": 2
+    },
+    "VersionString": "1.9.2"
+}
+Progress: {
+    "State": "WORKING",
+    "Working": {
+        "ETASeconds": 0,
+        "Hours": -1,
+        "Minutes": -1,
+        "Pass": 1,
+        "PassCount": 1,
+        "PassID": 0,
+        "Paused": 0,
+        "Progress": 0.98000001907348633,
+        "Rate": 0.0,
+        "RateAvg": 0.0,
+        "Seconds": -1,
+        "SequenceID": 1
+    }
+}
+Progress: {
+    "State": "WORKDONE",
+    "WorkDone": {
+        "Error": 0,
+        "SequenceID": 1
+    }
+}
+
