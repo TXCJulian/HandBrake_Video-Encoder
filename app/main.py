@@ -5,17 +5,18 @@ import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
-from fastapi.exceptions import HTTPException as _HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as _HTTPException
 
 from app import config, encoders
 from app.handbrake_runner import handbrake_info
-from app.job_manager import Job, JobStatus, manager
+from app.job_manager import Job, manager
 from app.models import EncodeRequest
 from app.ops import run_encode_job
 from app.paths import PathNotAllowed, SourceNotFound, validate_source_path
-from app.presets import PresetError, find_preset, preset_encoder
+from app.presets import PresetError, find_preset, preset_encoder, preset_extension
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,9 +45,16 @@ async def lifespan(_app: FastAPI):
     threading.Thread(target=encoders.available_encoders, daemon=True).start()
     stop = threading.Event()
     threading.Thread(target=_sweep_loop, args=(stop,), daemon=True).start()
-    yield
-    stop.set()
-    manager.shutdown()
+    try:
+        yield
+    finally:
+        # Starlette throws into this generator at the yield on an abnormal
+        # shutdown too, so this must be a finally, not code after a bare
+        # yield: manager.shutdown()'s cancel sweep is load-bearing (it kills
+        # any HandBrake child still running), and skipping it on an error
+        # path would leave that child writing an uncollected partial.
+        stop.set()
+        manager.shutdown()
 
 
 app = FastAPI(title="HandBrake Video Encoder", version="0.1.0", lifespan=lifespan)
@@ -57,13 +65,37 @@ async def _flatten_detail(_request: Request, exc: _HTTPException):
     """Return machine-readable error bodies at the top level.
 
     The renamer branches on ``code``, so it must not be buried under
-    ``{"detail": {...}}``.
+    ``{"detail": {...}}``. Registered on Starlette's HTTPException, not
+    FastAPI's subclass: Starlette's handler lookup walks
+    ``type(exc).__mro__``, so this still catches the FastAPI subclass, but
+    also catches framework-raised errors (unknown route, wrong method) that
+    are plain ``starlette.exceptions.HTTPException`` instances and would
+    otherwise bypass this handler entirely and escape as
+    ``{"detail": "Not Found"}`` with no ``code``.
     """
+    headers = getattr(exc, "headers", None)
     if isinstance(exc.detail, dict):
-        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+        return JSONResponse(
+            status_code=exc.status_code, content=exc.detail, headers=headers
+        )
     return JSONResponse(
         status_code=exc.status_code,
         content={"code": "error", "reason": str(exc.detail)},
+        headers=headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def _flatten_validation_error(_request: Request, exc: RequestValidationError):
+    """Same top-level ``code`` contract for body/query validation failures.
+
+    FastAPI raises this separately from HTTPException for malformed request
+    bodies (e.g. a missing required field), so it needs its own handler to
+    avoid leaking the default ``{"detail": [...]}`` shape.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={"code": "invalid_request", "reason": str(exc)},
     )
 
 
@@ -119,6 +151,9 @@ def post_job(req: EncodeRequest) -> dict:
     try:
         preset = find_preset(req.preset_json, req.preset_name)
         encoder = preset_encoder(preset)
+        # Decidable now, same as encoder/path: an unsupported container must
+        # not become an async job failure the caller has to poll to discover.
+        preset_extension(preset)
     except PresetError as exc:
         raise HTTPException(
             status_code=400, detail={"code": "preset_not_found", "reason": str(exc)}
@@ -138,11 +173,16 @@ def post_job(req: EncodeRequest) -> dict:
         )
 
     job = manager.submit(lambda j: run_encode_job(j, req))
-    if job.status is JobStatus.FAILED:
+    if manager.get(job.id) is None:
         # submit() marks a job FAILED without storing it when the manager is
-        # not running (during/after shutdown). Returning {"job_id": ...} here
-        # would hand back an id that GET /jobs/{id} immediately 404s on, so
-        # this must be surfaced synchronously instead of as a pollable job.
+        # not running (during/after shutdown) - that is the correct signal
+        # for "never accepted". Checking job.status == FAILED instead would
+        # be racy: post_job runs concurrently with the worker, which can
+        # claim and fail a genuinely-stored job (source vanished, missing
+        # HandBrakeCLI, ...) before this line reads job.status. Reporting
+        # that as 503 would hide a real, pollable job_id from the caller,
+        # and since no id was returned it could never be DELETEd either -
+        # it would linger until the TTL sweep. "not stored" has no such race.
         raise HTTPException(
             status_code=503,
             detail={"code": "service_unavailable", "reason": job.error},

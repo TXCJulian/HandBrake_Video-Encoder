@@ -84,3 +84,25 @@ def test_rejects_an_unknown_preset_name(source):
         ops.run_encode_job(job, EncodeRequest(
             source_path=str(source), preset_json=PRESET_DOC, preset_name="Nope"
         ))
+
+
+def test_rejects_a_job_id_that_makes_the_output_collide_with_the_source(source, monkeypatch):
+    """run_encode_job is callable outside a route with a caller-chosen job
+    id. A colliding derived output would let HandBrakeCLI's -o truncate the
+    source in place, so this must raise before anything touches disk rather
+    than silently overwriting/deleting the source file.
+    """
+    from app.paths import OUTPUT_PREFIX
+
+    # The source's own name is engineered to equal what derive_output_path
+    # would produce for job id "JOBID" and the P1 preset's "mkv" extension.
+    colliding_source = source.parent / f"{OUTPUT_PREFIX}JOBID.mkv"
+    colliding_source.write_text("source bytes")
+    monkeypatch.setattr(ops.config, "ALLOWED_ROOTS", [str(source.parent)])
+
+    job = Job(id="JOBID")
+    with pytest.raises(ops.PathNotAllowed):
+        ops.run_encode_job(job, EncodeRequest(
+            source_path=str(colliding_source), preset_json=PRESET_DOC, preset_name="P1"
+        ))
+    assert colliding_source.read_text() == "source bytes"

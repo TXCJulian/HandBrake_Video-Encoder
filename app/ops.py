@@ -13,7 +13,7 @@ from app.handbrake_runner import (
 )
 from app.job_manager import Job
 from app.models import EncodeRequest
-from app.paths import derive_output_path, validate_source_path
+from app.paths import PathNotAllowed, derive_output_path, validate_source_path
 from app.presets import PresetError, find_preset, preset_encoder, preset_extension
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,15 @@ def run_encode_job(job: Job, req: EncodeRequest) -> None:
     extension = preset_extension(preset)
     dst = derive_output_path(src, job.id, extension)
 
+    if os.path.realpath(dst) == src:
+        # Unreachable through the API today (job.id is a fresh uuid4), but
+        # run_encode_job is explicitly callable outside a route with a
+        # caller-chosen id. Were this to collide, HandBrakeCLI's -o would
+        # truncate the source in place, and a subsequent failure would then
+        # have _remove_partial delete it outright. Caught where the claim on
+        # dst is made, before anything touches disk.
+        raise PathNotAllowed("Derived output collides with the source")
+
     job.encoder_used = encoder
     job.output_path = dst
     job.message = "Encoding"
@@ -45,8 +54,15 @@ def run_encode_job(job: Job, req: EncodeRequest) -> None:
         mode="w", suffix=".json", encoding="utf-8", delete=False
     )
     try:
-        json.dump(req.preset_json, handle)
-        handle.close()
+        # close() lives in its own finally, separate from the outer one that
+        # unlinks: if json.dump raises (non-serialisable document, ENOSPC),
+        # the handle must still be closed here, or os.unlink below raises
+        # PermissionError on Windows (an OSError, silently swallowed by the
+        # existing handler) and the temp file leaks.
+        try:
+            json.dump(req.preset_json, handle)
+        finally:
+            handle.close()
         cmd = build_encode_command(src, dst, handle.name, req.preset_name)
         try:
             run_encode(
