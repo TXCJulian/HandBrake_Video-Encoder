@@ -1,4 +1,5 @@
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -303,3 +304,86 @@ def test_handbrake_info_parses_the_version_from_a_realistic_banner(monkeypatch):
         "version": "1.9.2",
         "path": "/usr/bin/HandBrakeCLI",
     }
+
+
+# ---- C-1 regression coverage: exception escaping the stdout loop ----------
+
+def test_exception_in_loop_kills_process_and_preserves_original_error(
+    fake_handbrake, monkeypatch
+):
+    """Pins C-1(a): if anything inside the stdout loop raises (here forced
+    via a broken parse_progress_objects, since the guarded on_progress from
+    C-1(c) can no longer be the trigger), the process still running must be
+    killed immediately rather than politely waited on — and the ORIGINAL
+    exception must propagate unmasked. Before the fix, the still-running
+    process took the long `proc.wait(timeout=timeout)` branch in `finally`,
+    blocked on its full stdout pipe, and a subsequent TimeoutExpired there
+    raised a bogus HandBrakeError that replaced the real exception.
+    """
+    monkeypatch.setattr(
+        handbrake_runner,
+        "parse_progress_objects",
+        lambda _chunk: (_ for _ in ()).throw(RuntimeError("parser exploded")),
+    )
+    exe = fake_handbrake(
+        """
+        import sys, time
+        print('Progress: {"State": "WORKING", "Working": {"Progress": 0.1}}', flush=True)
+        time.sleep(60)
+        """
+    )
+    start = time.monotonic()
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        run_encode(
+            exe,
+            on_progress=lambda _p: None,
+            cancel_event=threading.Event(),
+            timeout=5,
+        )
+    elapsed = time.monotonic() - start
+    assert elapsed < 5, f"expected a fast kill, took {elapsed}s (close to the 5s timeout)"
+
+
+def test_invalid_utf8_on_stdout_does_not_abort_the_encode(fake_handbrake):
+    """Pins C-1(b): stdout is decoded with errors="replace", matching the
+    stderr temp file's leniency, so undecodable bytes on stdout (a media
+    path or encoder banner can carry them) do not raise out of the read
+    loop and abort an otherwise healthy encode.
+    """
+    exe = fake_handbrake(
+        r"""
+        import sys
+        sys.stdout.buffer.write(b"\xff\xfe invalid \xc3\x28\n")
+        sys.stdout.buffer.flush()
+        print('Progress: {"State": "WORKING", "Working": {"Progress": 0.3}}', flush=True)
+        sys.exit(0)
+        """
+    )
+    seen: list[float] = []
+    run_encode(exe, on_progress=seen.append, cancel_event=threading.Event())
+    assert seen == [pytest.approx(30.0)]
+
+
+def test_raising_on_progress_does_not_fail_a_healthy_encode(fake_handbrake, caplog):
+    """Pins C-1(c): a raising on_progress callback must not fail an
+    otherwise healthy encode — the same guarantee parse_progress_objects'
+    docstring already makes for malformed JSON extends to what consumes its
+    parsed result.
+    """
+    exe = fake_handbrake(
+        """
+        import sys
+        print('Progress: {"State": "WORKING", "Working": {"Progress": 0.4}}', flush=True)
+        print('Progress: {"State": "WORKING", "Working": {"Progress": 0.8}}', flush=True)
+        sys.exit(0)
+        """
+    )
+
+    def _raise(_p):
+        raise RuntimeError("progress consumer exploded")
+
+    with caplog.at_level("WARNING", logger="app.handbrake_runner"):
+        run_encode(exe, on_progress=_raise, cancel_event=threading.Event())
+    assert any(
+        "on_progress" in record.getMessage() for record in caplog.records
+    )
