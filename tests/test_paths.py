@@ -1,7 +1,9 @@
 import os
+from unittest.mock import patch
 
 import pytest
 
+from app import config
 from app.paths import (
     PathNotAllowed,
     SourceNotFound,
@@ -73,3 +75,60 @@ def test_derived_output_rejects_a_traversal_job_id():
 def test_derived_output_rejects_a_traversal_extension():
     with pytest.raises(PathNotAllowed):
         derive_output_path("/media1/Movies/Dune.mkv", "abc123", "../mkv")
+
+
+def test_rejects_a_symlink_pointing_outside_the_allowed_root(tmp_path):
+    """Symlink inside root pointing to file outside must be rejected."""
+    media = tmp_path / "media1"
+    media.mkdir()
+    outside = tmp_path / "secrets.txt"
+    outside.write_text("x")
+
+    symlink = media / "link.mkv"
+    try:
+        symlink.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted on this platform")
+
+    with pytest.raises(PathNotAllowed):
+        validate_source_path(str(symlink), [str(media)])
+
+
+def test_accepts_a_symlink_pointing_inside_the_allowed_root(tmp_path):
+    """Symlink inside root pointing to file inside must be accepted and resolved."""
+    media = tmp_path / "media1"
+    media.mkdir()
+    target = media / "target.mkv"
+    target.write_text("x")
+
+    symlink = media / "link.mkv"
+    try:
+        symlink.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted on this platform")
+
+    result = validate_source_path(str(symlink), [str(media)])
+    # Should return the resolved path, not the symlink path
+    assert result == os.path.realpath(str(target))
+
+
+def test_uses_config_allowed_roots_by_default(tmp_path):
+    """validate_source_path with no roots argument uses config.ALLOWED_ROOTS."""
+    media = tmp_path / "media1"
+    media.mkdir()
+    movie = media / "movie.mkv"
+    movie.write_text("x")
+
+    with patch.object(config, "ALLOWED_ROOTS", [str(media)]):
+        result = validate_source_path(str(movie))
+        assert result == os.path.realpath(str(movie))
+
+
+def test_raises_path_not_allowed_when_config_roots_empty(tmp_path):
+    """validate_source_path raises PathNotAllowed when config.ALLOWED_ROOTS is empty."""
+    movie = tmp_path / "movie.mkv"
+    movie.write_text("x")
+
+    with patch.object(config, "ALLOWED_ROOTS", []):
+        with pytest.raises(PathNotAllowed):
+            validate_source_path(str(movie))
