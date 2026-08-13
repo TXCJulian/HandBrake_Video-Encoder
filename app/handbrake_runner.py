@@ -28,19 +28,23 @@ from app import config
 
 logger = logging.getLogger(__name__)
 
-_PREFIXES = ("Progress:", "Version:", "JSON Title Set:")
-"""Line prefixes HandBrake puts before a JSON object on stdout.
-
-Confirmed by the Task 1 build spike. Only ``Progress:`` objects are acted
-on; the others are recognised so their braces do not corrupt accumulation.
-"""
-
 _CANCEL_GRACE_SECONDS = 0.2
 """Grace window after cancel fires before the process is killed.
 
 Narrows the clean-exit race rather than eliminating it: on heavily loaded
 hardware a process could still be killed inside its own teardown if that
 teardown outlasts this window. A practical mitigation, not a guarantee.
+"""
+
+_MAX_BUFFER_BYTES = 1 << 20
+"""Cap on the accumulated stdout buffer in run_encode, in bytes (1 MiB).
+
+Guards against a stray unmatched ``{`` in HandBrake's stdout noise: with no
+matching close, ``parse_progress_objects`` never sees depth return to zero,
+so no object ever completes again and the buffer would otherwise grow for
+the rest of a multi-hour encode — silently losing all further progress
+reports and leaking memory in a long-lived service. When the cap is hit the
+buffer is dropped and accumulation restarts from the next line.
 """
 
 
@@ -162,11 +166,20 @@ def run_encode(
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errf:
         proc = subprocess.Popen(
             cmd,
+            # Nothing writes to HandBrake's stdin; leaving it inherited risks
+            # an interactive prompt (e.g. an overwrite confirmation) blocking
+            # the child forever until the timeout kills it. DEVNULL makes any
+            # such prompt fail fast instead.
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=errf,
             text=True,
             bufsize=1,
+            # Stdout is decoded leniently, matching the stderr temp file: a
+            # media path or encoder banner can carry non-UTF-8 bytes, and the
+            # stream nobody parses byte-exactly must not be stricter than the
+            # one that's explicitly best-effort.
+            errors="replace",
         )
         watcher = threading.Thread(
             target=_watch_cancel, args=(proc, cancel_event), daemon=True
@@ -175,6 +188,7 @@ def run_encode(
 
         buffer = ""
         returncode: int | None = None
+        completed = False
         try:
             for line in proc.stdout or []:
                 buffer += line
@@ -189,6 +203,14 @@ def run_encode(
                 # progress would silently never fire. Confirmed against real
                 # --json output in docs/spike/json-output.txt.
                 if not objects:
+                    if len(buffer) > _MAX_BUFFER_BYTES:
+                        logger.warning(
+                            "HandBrake stdout buffer exceeded %d bytes with no "
+                            "complete object (likely an unmatched '{'); "
+                            "dropping buffer to recover",
+                            len(buffer),
+                        )
+                        buffer = ""
                     continue
                 for obj in objects:
                     working = obj.get("Working")
@@ -196,10 +218,33 @@ def run_encode(
                         continue
                     fraction = working.get("Progress")
                     if isinstance(fraction, (int, float)):
-                        on_progress(min(float(fraction) * 100.0, 100.0))
+                        # A caller-supplied callback must never be able to
+                        # fail an otherwise healthy encode — the same
+                        # guarantee parse_progress_objects makes for
+                        # malformed JSON extends to what consumes its result.
+                        try:
+                            on_progress(min(float(fraction) * 100.0, 100.0))
+                        except Exception:
+                            logger.warning(
+                                "on_progress callback raised; ignoring",
+                                exc_info=True,
+                            )
                 buffer = ""
+            completed = True
         finally:
-            if proc.poll() is None:
+            if not completed and proc.poll() is None:
+                # The stdout loop aborted (e.g. on_progress or the line
+                # iterator itself raised) with the process still running and
+                # nobody left to drain stdout. Taking the polite `proc.wait
+                # (timeout=timeout)` branch below would let the child block
+                # on a full pipe buffer for up to `timeout`, and a
+                # subsequent TimeoutExpired would then replace the real
+                # exception with a bogus timeout error from inside this same
+                # `finally`. Kill immediately and reap with a short bounded
+                # wait instead, so the original exception propagates.
+                proc.kill()
+                proc.wait(timeout=10)
+            elif proc.poll() is None:
                 try:
                     proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
@@ -246,9 +291,10 @@ def handbrake_info() -> dict:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=15,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, ValueError):
         logger.warning("Could not run HandBrakeCLI --version", exc_info=True)
         return {"available": False, "version": "", "path": path}
     if result.returncode != 0:

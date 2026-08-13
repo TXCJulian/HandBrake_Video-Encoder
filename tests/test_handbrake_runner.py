@@ -1,14 +1,20 @@
 import threading
+from pathlib import Path
 
 import pytest
 
+from app import handbrake_runner
 from app.handbrake_runner import (
     HandBrakeCancelled,
     HandBrakeError,
     build_encode_command,
+    handbrake_info,
     parse_progress_objects,
     run_encode,
 )
+
+_SPIKE_JSON = Path(__file__).resolve().parents[1] / "docs" / "spike" / "json-output.txt"
+_SPIKE_VERSION = Path(__file__).resolve().parents[1] / "docs" / "spike" / "version.txt"
 
 
 # ---- argv building (pure) -------------------------------------------------
@@ -87,8 +93,13 @@ def test_parses_real_handbrake_output_verbatim(fake_handbrake):
     closing the nested "Working" object contains a brace while the outer
     object is still open. An implementation that clears its buffer on any
     brace-bearing line never completes the object and reports no progress
-    at all. Captured verbatim from HandBrake 1.9.2 (docs/spike/json-output.txt).
+    at all. This reads docs/spike/json-output.txt directly (rather than
+    embedding a hand-trimmed copy) so the test stays honestly "verbatim",
+    including the leading Version record's own nested "Version": {...}
+    object — a second brace-nesting level outside any Progress record,
+    which is exactly the kind of construct this regression must survive.
     """
+    output = _SPIKE_JSON.read_text(encoding="utf-8")
     # Built as a single repr()'d literal (rather than a nested triple-quoted
     # string) so every line of the *generated script* stays uniformly
     # indented. A raw multi-line literal here would put unindented JSON
@@ -96,29 +107,6 @@ def test_parses_real_handbrake_output_verbatim(fake_handbrake):
     # the same block as the indented `import sys`/`sys.exit(0)` lines,
     # which defeats textwrap.dedent's common-prefix stripping in the
     # fixture and raises IndentationError when the script is written out.
-    output = (
-        'Version: {\n'
-        '    "Arch": "x86_64",\n'
-        '    "Name": "HandBrake",\n'
-        '    "VersionString": "1.9.2"\n'
-        '}\n'
-        'Progress: {\n'
-        '    "State": "WORKING",\n'
-        '    "Working": {\n'
-        '        "ETASeconds": 0,\n'
-        '        "Pass": 1,\n'
-        '        "Progress": 0.98000001907348633,\n'
-        '        "SequenceID": 1\n'
-        '    }\n'
-        '}\n'
-        'Progress: {\n'
-        '    "State": "WORKDONE",\n'
-        '    "WorkDone": {\n'
-        '        "Error": 0,\n'
-        '        "SequenceID": 1\n'
-        '    }\n'
-        '}\n'
-    )
     exe = fake_handbrake(
         f'''
         import sys
@@ -212,3 +200,106 @@ def test_large_stderr_does_not_deadlock(fake_handbrake):
         """
     )
     run_encode(exe, on_progress=lambda _p: None, cancel_event=threading.Event())
+
+
+# ---- stdout buffer cap (recovery from an unmatched brace) -----------------
+
+def test_stray_unmatched_brace_recovers_after_buffer_cap(fake_handbrake, monkeypatch):
+    """A single unmatched '{' pins parse_progress_objects' depth above zero
+    forever, so no later object can ever complete against that buffer. The
+    cap must drop the poisoned buffer once it grows past the limit so a
+    subsequent, well-formed object still gets parsed and reported.
+    """
+    monkeypatch.setattr(handbrake_runner, "_MAX_BUFFER_BYTES", 64)
+    exe = fake_handbrake(
+        """
+        import sys
+        sys.stdout.write("noise { unmatched\\n")
+        sys.stdout.write("padding padding padding padding padding padding}\\n" * 5)
+        print('Progress: {"State": "WORKING", "Working": {"Progress": 0.5}}', flush=True)
+        sys.exit(0)
+        """
+    )
+    seen: list[float] = []
+    run_encode(exe, on_progress=seen.append, cancel_event=threading.Event())
+    assert seen == [pytest.approx(50.0)]
+
+
+def test_buffer_cap_triggers_and_logs_a_warning(fake_handbrake, monkeypatch, caplog):
+    """The buffer must not grow unbounded for the rest of a multi-hour
+    encode just because one stray '{' appeared in stdout noise: the cap has
+    to trigger (and be observable, via a warning) well before that.
+    """
+    monkeypatch.setattr(handbrake_runner, "_MAX_BUFFER_BYTES", 64)
+    exe = fake_handbrake(
+        """
+        import sys
+        sys.stdout.write("noise { unmatched\\n")
+        sys.stdout.write("padding padding padding padding padding padding}\\n" * 5)
+        sys.exit(0)
+        """
+    )
+    with caplog.at_level("WARNING", logger="app.handbrake_runner"):
+        run_encode(exe, on_progress=lambda _p: None, cancel_event=threading.Event())
+    assert any(
+        "buffer exceeded" in record.getMessage() for record in caplog.records
+    )
+
+
+# ---- handbrake_info ---------------------------------------------------------
+
+def test_handbrake_info_reports_unavailable_when_binary_is_absent(monkeypatch):
+    handbrake_info.cache_clear()
+    monkeypatch.setattr(handbrake_runner.shutil, "which", lambda _name: None)
+    info = handbrake_info()
+    assert info == {"available": False, "version": "", "path": ""}
+
+
+def test_handbrake_info_reports_unavailable_on_nonzero_exit(monkeypatch):
+    handbrake_info.cache_clear()
+    monkeypatch.setattr(handbrake_runner.shutil, "which", lambda _name: "/usr/bin/HandBrakeCLI")
+
+    class _Result:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr(handbrake_runner.subprocess, "run", lambda *a, **kw: _Result())
+    info = handbrake_info()
+    assert info["available"] is False
+    assert info["path"] == "/usr/bin/HandBrakeCLI"
+
+
+def test_handbrake_info_reports_unavailable_when_run_raises_oserror(monkeypatch):
+    handbrake_info.cache_clear()
+    monkeypatch.setattr(handbrake_runner.shutil, "which", lambda _name: "/usr/bin/HandBrakeCLI")
+
+    def _raise(*_a, **_kw):
+        raise OSError("wrong architecture")
+
+    monkeypatch.setattr(handbrake_runner.subprocess, "run", _raise)
+    info = handbrake_info()
+    assert info == {"available": False, "version": "", "path": "/usr/bin/HandBrakeCLI"}
+
+
+def test_handbrake_info_parses_the_version_from_a_realistic_banner(monkeypatch):
+    """Uses the real banner shape captured in docs/spike/version.txt, whose
+    last line is "HandBrake 1.9.2" — HandBrakeCLI writes its startup log
+    (including this line) to stderr, not stdout.
+    """
+    handbrake_info.cache_clear()
+    banner = _SPIKE_VERSION.read_text(encoding="utf-8")
+    monkeypatch.setattr(handbrake_runner.shutil, "which", lambda _name: "/usr/bin/HandBrakeCLI")
+
+    class _Result:
+        returncode = 0
+        stdout = ""
+        stderr = banner
+
+    monkeypatch.setattr(handbrake_runner.subprocess, "run", lambda *a, **kw: _Result())
+    info = handbrake_info()
+    assert info == {
+        "available": True,
+        "version": "1.9.2",
+        "path": "/usr/bin/HandBrakeCLI",
+    }
