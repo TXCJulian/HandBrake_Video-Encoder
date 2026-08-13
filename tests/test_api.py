@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import encoders, main, ops
+from app.job_manager import Job, JobStatus
 from app.main import app
 
 PRESET_DOC = {
@@ -170,28 +171,83 @@ def test_post_jobs_rejects_an_unsupported_container(client):
     assert r.json()["code"] == "preset_not_found"
 
 
-def test_post_jobs_returns_202_for_a_job_that_fails_immediately(client, monkeypatch):
-    """A worker claiming and failing a genuinely-stored job before the route
-    reads job.status must still surface as a normal 202 with a pollable id,
-    not the 503 reserved for jobs the manager never accepted.
+def test_post_jobs_returns_202_for_a_stored_job_that_is_already_failed(client, monkeypatch):
+    """A STORED job that happens to already be FAILED (the worker claimed and
+    failed it before the route re-reads it) must still get 202 with a
+    pollable id - not the 503 reserved for jobs the manager never accepted.
+
+    This is deterministic, unlike timing the real worker race: manager.submit
+    is monkeypatched with a fake that stores a real, already-FAILED Job in
+    the manager's own store (so manager.get(job.id) finds it, matching
+    exactly what a real worker leaves behind) and returns it. No sleeps, no
+    retries - the "already failed by the time the route reads it" case is
+    constructed directly instead of hoped for.
+
+    Non-vacuity check (see fix report): reverting the production check in
+    app/main.py from `manager.get(job.id) is None` back to
+    `job.status is JobStatus.FAILED` makes this test fail with a 503,
+    confirming it actually exercises the distinction.
     """
     c, media = client
 
-    def boom(*a, **k):
-        raise RuntimeError("boom")
+    def fake_submit(fn):
+        job = Job(id="stored-and-failed")
+        # finished_at before status, matching the single-writer ordering
+        # invariant documented on Job/_worker.
+        job.finished_at = time.time()
+        job.error = "boom"
+        job.status = JobStatus.FAILED
+        with main.manager._lock:
+            main.manager._jobs[job.id] = job
+        return job
 
-    monkeypatch.setattr(ops, "run_encode", boom)
+    monkeypatch.setattr(main.manager, "submit", fake_submit)
     r = c.post("/jobs", json={
         "source_path": str(media / "movie.mkv"),
         "preset_json": PRESET_DOC,
         "preset_name": "P1",
     })
     assert r.status_code == 202
-    job_id = r.json()["job_id"]
+    body = r.json()
+    assert body["job_id"] == "stored-and-failed"
 
-    body = _poll_until_terminal(c, job_id)
-    assert body["status"] == "failed"
-    assert body["job_id"] == job_id
+    poll = c.get("/jobs/stored-and-failed")
+    assert poll.status_code == 200
+    assert poll.json()["status"] == "failed"
+
+
+def test_post_jobs_returns_503_for_a_job_the_manager_never_stored(client, monkeypatch):
+    """An UNSTORED job (submit()'s not-running case) must get 503 with the
+    job's own error message surfaced as ``reason``.
+
+    Deterministic via a monkeypatched manager.submit, mirroring exactly what
+    the real submit() does when the manager is not running: builds a FAILED
+    Job and returns it without inserting it into the store.
+
+    Non-vacuity check (see fix report): reverting the production check back
+    to `job.status is JobStatus.FAILED` still passes this particular test
+    (an unstored FAILED job satisfies both checks) - the pairing with the
+    test above is what pins the two signals apart.
+    """
+    c, media = client
+
+    def fake_submit(fn):
+        job = Job(id="never-stored")
+        job.finished_at = time.time()
+        job.error = "Service is shutting down; job not accepted"
+        job.status = JobStatus.FAILED
+        return job  # deliberately not inserted into main.manager._jobs
+
+    monkeypatch.setattr(main.manager, "submit", fake_submit)
+    r = c.post("/jobs", json={
+        "source_path": str(media / "movie.mkv"),
+        "preset_json": PRESET_DOC,
+        "preset_name": "P1",
+    })
+    assert r.status_code == 503
+    body = r.json()
+    assert body["code"] == "service_unavailable"
+    assert body["reason"] == "Service is shutting down; job not accepted"
 
 
 def test_unknown_route_returns_a_top_level_code(client):
