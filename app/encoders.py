@@ -19,14 +19,16 @@ _INDENTED_VALUE = re.compile(r"^\s{4,}(\S+)\s*$")
 _ANY_FLAG = re.compile(r"^\s*-")
 
 _cache: list[str] | None = None
+_generation: int = 0
 _lock = threading.Lock()
 
 
 def reset_cache() -> None:
     """Drop the cached probe result. For tests."""
-    global _cache
+    global _cache, _generation
     with _lock:
         _cache = None
+        _generation += 1
 
 
 def parse_encoder_list(output: str) -> list[str]:
@@ -58,10 +60,11 @@ def available_encoders() -> list[str]:
     Never raises: a missing or unrunnable HandBrakeCLI yields an empty list,
     which ``/health`` reports as degraded rather than crashing the service.
     """
-    global _cache
+    global _cache, _generation
     with _lock:
         if _cache is not None:
             return list(_cache)
+        gen = _generation
     try:
         result = subprocess.run(
             [config.HANDBRAKE_BIN, "--help"],
@@ -75,8 +78,9 @@ def available_encoders() -> list[str]:
         logger.warning("Could not probe HandBrakeCLI encoders", exc_info=True)
         names = []
     with _lock:
-        _cache = names
-        return list(_cache)
+        if _generation == gen:
+            _cache = names
+        return list(names)
 
 
 def is_available(encoder: str) -> bool:

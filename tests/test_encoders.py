@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from app import encoders
@@ -78,3 +80,51 @@ def test_is_available_reflects_the_probed_list(monkeypatch):
     )
     assert encoders.is_available("qsv_h264") is True
     assert encoders.is_available("av1_nvenc") is False
+
+
+def test_reset_cache_invalidates_inflight_probe(monkeypatch):
+    """Verify that reset_cache during an inflight probe discards the result."""
+    calls = {"n": 0}
+    event = threading.Event()
+
+    def _blocking_run(*_a, **_k):
+        calls["n"] += 1
+        event.wait(timeout=5)  # Block until event is set
+        return type("R", (), {"returncode": 0, "stdout": HELP, "stderr": ""})()
+
+    monkeypatch.setattr(encoders.subprocess, "run", _blocking_run)
+
+    # Start a probe in a background thread
+    result_holder = {}
+
+    def _probe_in_thread():
+        result_holder["result"] = encoders.available_encoders()
+
+    thread = threading.Thread(target=_probe_in_thread)
+    thread.start()
+
+    # Give the thread time to start its probe
+    import time
+
+    time.sleep(0.1)
+
+    # While the probe is in-flight, reset the cache
+    encoders.reset_cache()
+
+    # Release the blocking probe
+    event.set()
+    thread.join(timeout=5)
+
+    # The inflight probe should have run but NOT populated the cache
+    assert calls["n"] == 1
+
+    # The next call should perform a NEW probe (cache was not populated)
+    event.clear()
+    thread2 = threading.Thread(target=_probe_in_thread)
+    thread2.start()
+    time.sleep(0.1)
+    event.set()
+    thread2.join(timeout=5)
+
+    # Should have called subprocess twice now
+    assert calls["n"] == 2
