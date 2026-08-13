@@ -1,0 +1,20 @@
+services:
+  handbrake-encoder:
+    build: .
+    image: handbrake-video-encoder:latest
+    container_name: handbrake-encoder
+    restart: unless-stopped
+    ports:
+      - "3335:3335"
+    environment:
+      # Must match the renamer's in-container mount paths exactly.
+      ENCODER_ALLOWED_ROOTS: "/media1,/media2,/media3"
+      ENCODER_WORKERS: "1"
+      ENCODER_JOB_TTL: "3600"
+      PUID: "1000"
+      PGID: "1000"
+      UMASK: "022"
+    volumes:
+      - /mnt/Media1:/media1
+      - /mnt/Media2:/media2
+      - /mnt/Media3:/media3
