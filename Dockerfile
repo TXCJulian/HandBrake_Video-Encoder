@@ -29,17 +29,32 @@ RUN set -eux; \
     ./configure --launch-jobs="$(nproc)" --launch --disable-gtk ${GPU_FLAGS}
 
 # ---- runtime stage ---------------------------------------------------------
-FROM python:3.11-slim-bookworm
+# Ubuntu 24.04, the SAME release as the build stage. This is load-bearing, not
+# stylistic. Verified with objdump/ldd against the Task 1 spike binary:
+#   * it requires GLIBC_2.38, and Debian bookworm ships 2.36 — the binary
+#     cannot exec there at all;
+#   * it needs libvpx.so.9, and bookworm provides only libvpx.so.7;
+#   * it links libva.so.2 / libva-drm.so.2 / libdrm.so.2, which must be present
+#     at RUNTIME too, not merely as -dev packages in the build stage.
+# Build and runtime bases must stay on the same distro release.
+FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libass9 libjansson4 libmp3lame0 libnuma1 libogg0 libopus0 \
-      libsamplerate0 libspeex1 libtheora0 libturbojpeg0 libvorbis0a \
-      libvorbisenc2 libx264-164 libxml2 libvpx7 libfribidi0 libharfbuzz0b \
-      libfontconfig1 libfreetype6 util-linux \
+      libsamplerate0 libspeex1 libtheora0 libturbojpeg libvorbis0a \
+      libvorbisenc2 libx264-164 libxml2 libvpx9 libfribidi0 libharfbuzz0b \
+      libfontconfig1 libfreetype6 \
+      libva2 libva-drm2 libdrm2 \
+      util-linux python3 python3-venv ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/build/HandBrakeCLI /usr/local/bin/HandBrakeCLI
+
+# PEP 668: Ubuntu's system Python is externally managed and refuses a bare
+# `pip install`, so the dependencies live in a venv that is first on PATH.
+ENV VIRTUAL_ENV=/opt/venv PATH="/opt/venv/bin:$PATH"
+RUN python3 -m venv "$VIRTUAL_ENV"
 
 WORKDIR /app
 COPY requirements.txt .
@@ -55,7 +70,7 @@ ENV PORT=3335
 EXPOSE 3335
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import os,urllib.request;urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",\"3335\")}/health').read()"
+  CMD python3 -c "import os,urllib.request;urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",\"3335\")}/health').read()"
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-3335}"]
