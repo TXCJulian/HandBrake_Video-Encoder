@@ -1,6 +1,8 @@
 import threading
 import time
 
+import pytest
+
 from app.handbrake_runner import HandBrakeCancelled
 from app.job_manager import Job, JobManager, JobStatus
 
@@ -80,15 +82,39 @@ def test_delete_of_an_unknown_job_returns_false():
 
 
 def test_a_job_deleted_before_it_runs_never_executes():
+    # submit() now requires the manager to be running (see the
+    # submit()-after-shutdown fix below), so this can no longer submit
+    # before start() to guarantee the job sits unclaimed in the queue.
+    # Instead: keep the single worker busy with a blocker job, submit and
+    # delete the real job while the worker can't possibly have reached it
+    # yet, then release the blocker and let the worker dequeue the deleted
+    # job.
     manager = JobManager(workers=1, ttl_seconds=3600)
-    ran = threading.Event()
-    job = manager.submit(lambda j: ran.set())
-    manager.delete(job.id)
     manager.start()
     try:
-        time.sleep(0.3)
+        blocker_started = threading.Event()
+        release_blocker = threading.Event()
+
+        def blocker(_job):
+            blocker_started.set()
+            release_blocker.wait(timeout=5)
+
+        blocker_job = manager.submit(blocker)
+        assert blocker_started.wait(timeout=5)
+
+        ran = threading.Event()
+        job = manager.submit(lambda j: ran.set())
+        assert manager.delete(job.id) is True
+
+        release_blocker.set()
+        assert _wait_for(lambda: blocker_job.status is JobStatus.COMPLETED)
+
+        # Assert the positive first: this proves the worker actually
+        # dequeued the deleted item and _claim rejected it, rather than
+        # merely observing that a fixed sleep wasn't long enough for it to
+        # run (which would pass vacuously on a loaded test runner).
+        assert _wait_for(lambda: job.status is JobStatus.CANCELLED)
         assert not ran.is_set()
-        assert job.status is JobStatus.CANCELLED
     finally:
         manager.shutdown()
 
@@ -113,6 +139,65 @@ def test_sweep_keeps_jobs_inside_the_ttl():
         assert _wait_for(lambda: job.status is JobStatus.COMPLETED)
         assert manager.sweep() == 0
         assert manager.get(job.id) is not None
+    finally:
+        manager.shutdown()
+
+
+def test_shutdown_cancels_a_running_job_before_queueing_sentinels():
+    manager = JobManager(workers=1, ttl_seconds=3600)
+    manager.start()
+    try:
+        started = threading.Event()
+
+        def slow(job):
+            started.set()
+            job.cancel_event.wait(timeout=5)
+            raise HandBrakeCancelled("Cancelled")
+
+        job = manager.submit(slow)
+        assert started.wait(timeout=5)
+        manager.shutdown()
+        assert job.cancel_event.is_set()
+    finally:
+        manager.shutdown()
+
+
+def test_submit_after_shutdown_returns_a_failed_job_and_does_not_enqueue():
+    manager = JobManager(workers=1, ttl_seconds=3600)
+    manager.start()
+    manager.shutdown()
+
+    ran = threading.Event()
+    job = manager.submit(lambda j: ran.set())
+
+    assert job.status is JobStatus.FAILED
+    assert job.error == "Service is shutting down; job not accepted"
+    assert job.finished_at is not None
+    # Nothing was ever started to consume the queue, so if the job had been
+    # enqueued instead of rejected up front, this would still catch it.
+    time.sleep(0.2)
+    assert not ran.is_set()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_job_raising_base_exception_is_marked_failed():
+    # BaseException (SystemExit here, standing in for
+    # SystemExit/KeyboardInterrupt) is re-raised out of _worker after the
+    # job is marked FAILED, per the fix's contract: interpreter-level
+    # semantics are preserved, so this deliberately kills the worker thread.
+    # We only assert on the job reaching FAILED, not on the thread's own
+    # demise; the resulting PytestUnhandledThreadExceptionWarning is the
+    # expected, intentional side effect of that re-raise and is silenced
+    # here rather than treated as a test failure.
+    manager = JobManager(workers=1, ttl_seconds=3600)
+    manager.start()
+    try:
+        def boom(_job):
+            raise SystemExit("bail out")
+
+        job = manager.submit(boom)
+        assert _wait_for(lambda: job.status is JobStatus.FAILED)
+        assert job.error == "bail out"
     finally:
         manager.shutdown()
 

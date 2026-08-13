@@ -33,10 +33,18 @@ _TERMINAL = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
 @dataclass
 class Job:
     """Concurrency invariant: single-writer — only the worker thread owning
-    this job mutates its fields; ``status`` is additionally written and read
-    under ``JobManager._lock``. Lock-free reads of the other fields (by
-    ``GET /jobs/{id}``) are safe *because* of that invariant; do not add a
-    second writer without revisiting it.
+    this job mutates its fields, including ``status``; the terminal writes in
+    ``_worker`` are made *without* ``JobManager._lock``. Their visibility to
+    other threads rests on CPython's GIL (each attribute store is atomic and
+    globally ordered) rather than on any explicit lock — a free-threaded
+    (no-GIL) build would need real locking here, since a plain attribute
+    store then carries no cross-thread ordering guarantee. Lock-free reads of
+    all fields (by ``GET /jobs/{id}``) are safe *because* of the
+    single-writer invariant; do not add a second writer without revisiting
+    it. ``_claim`` and ``submit`` are the two exceptions that write ``status``
+    under ``JobManager._lock`` — both do so before the job has (or, for
+    submit's synthetic FAILED case, ever will have) a worker thread touching
+    it, so there is no second concurrent writer at that point either.
     """
 
     id: str
@@ -102,9 +110,17 @@ class JobManager:
         Without setting the cancel events, a running encode's child process
         survives the process that spawned it and keeps writing a partial
         file nobody will collect.
+
+        ``_running`` is cleared under ``_lock`` *before* the pending snapshot
+        is taken, in the same critical section, so it cannot interleave with
+        ``submit()``: either ``submit()`` sees ``_running`` still True and
+        enqueues the job (in which case it is present in ``self._jobs`` and
+        this snapshot will catch it), or it sees ``_running`` False and
+        rejects the job itself without ever reaching the queue. There is no
+        window where a job is enqueued but excluded from `pending`.
         """
-        self._running = False
         with self._lock:
+            self._running = False
             pending = [j for j in self._jobs.values() if j.status not in _TERMINAL]
         for job in pending:
             job.cancel_event.set()
@@ -115,8 +131,23 @@ class JobManager:
         self._threads.clear()
 
     def submit(self, fn: Callable[[Job], None]) -> Job:
+        """Queue *fn* to run against a fresh job, unless the manager is not
+        running (never started, or already shut down).
+
+        In the not-running case the job is marked FAILED immediately rather
+        than silently enqueued: with no worker consuming the queue it would
+        stay QUEUED forever, invisible to ``sweep()`` (which only evicts
+        terminal jobs) and reported as perpetually queued by ``GET
+        /jobs/{id}``. Returning a FAILED job keeps the caller's contract
+        simple — no exception to catch — while making the condition visible.
+        """
         job = Job(id=uuid.uuid4().hex)
         with self._lock:
+            if not self._running:
+                job.finished_at = time.time()
+                job.error = "Service is shutting down; job not accepted"
+                job.status = JobStatus.FAILED
+                return job
             self._jobs[job.id] = job
         self._queue.put((job, fn))
         return job
@@ -194,6 +225,18 @@ class JobManager:
                 job.finished_at = time.time()
                 job.error = str(exc)
                 job.status = JobStatus.FAILED
+            except BaseException as exc:
+                # SystemExit/KeyboardInterrupt/etc. would otherwise propagate
+                # out of _worker and silently kill this thread — with the
+                # mandated single-worker default that stops the whole
+                # service without a trace. Mark the job FAILED so it is at
+                # least observable, then re-raise to preserve normal
+                # interpreter-level semantics for these exceptions.
+                logger.exception("Job %s failed with BaseException", job.id)
+                job.finished_at = time.time()
+                job.error = str(exc)
+                job.status = JobStatus.FAILED
+                raise
             else:
                 job.finished_at = time.time()
                 job.progress = 100.0
