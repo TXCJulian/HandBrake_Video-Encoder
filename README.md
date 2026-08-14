@@ -116,7 +116,7 @@ performs the swap itself — this service never modifies or deletes the source.
 ## Development
 
 ```bash
-pip install -r requirements.txt pytest httpx
+pip install -r requirements-dev.txt
 python -m pytest -v
 uvicorn app.main:app --host 0.0.0.0 --port 3335 --reload
 ```

@@ -1,3 +1,7 @@
-fastapi
-uvicorn[standard]
-pydantic>=2
+# Pinned so the test environment, CI, and the image all resolve the same stack.
+# These are the versions the container was built and end-to-end verified with;
+# leaving them open meant CI resolved a newer starlette than local and the two
+# disagreed about which HTTP client TestClient needs.
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+pydantic==2.13.4
