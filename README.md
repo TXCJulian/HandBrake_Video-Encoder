@@ -17,10 +17,12 @@ the hardware.
 Unlike the sibling
 [Whisper_Lyric-Transcriber](https://github.com/TXCJulian/Whisper_Lyric-Transcriber)
 service, this is a **single image for every GPU vendor**. A build spike
-(`docs/build-spike-findings.md`) confirmed that one HandBrakeCLI binary
-carries NVENC, QSV, and VCE support simultaneously — there is no per-vendor
-ML-stack incompatibility to work around here, so there is no need for
-per-vendor images.
+confirmed that one HandBrakeCLI binary carries NVENC, QSV, and VCE support
+simultaneously — there is no per-vendor ML-stack incompatibility to work
+around here, so there is no need for per-vendor images. Verified against the
+built image: `nvenc_{h264,h265,h265_10bit,av1,av1_10bit}`,
+`qsv_{h264,h265,h265_10bit,av1,av1_10bit}` and
+`vce_{h264,h265,h265_10bit,av1}` are all present in the one binary.
 
 ## The one deployment rule
 
@@ -37,18 +39,41 @@ A mismatch produces `404 source_not_found_on_encoder`.
 ```bash
 docker compose up -d                                                       # CPU
 docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up -d    # NVIDIA
+docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d     # Intel QSV
+docker compose -f docker-compose.yml -f docker-compose.amd.yml up -d       # AMD (VAAPI)
 ```
 
-For Intel QSV or AMD VCE, add `devices: [/dev/dri:/dev/dri]` to the service.
-The entrypoint joins the container user to the host's render group
-automatically.
+Or pull the published image instead of building:
+
+```bash
+docker pull ghcr.io/txcjulian/handbrake-video-encoder:latest
+```
+
+The Intel and AMD overrides pass `/dev/dri` through; the entrypoint joins the
+container user to the host's render group automatically. The image ships the
+vendor userspace drivers those encoders need (`iHD` and the oneVPL GPU runtime
+for Intel, mesa's `radeonsi` for AMD) — passing the device alone is not enough
+without them. NVENC needs no driver package: the NVIDIA container runtime
+injects `libnvidia-encode.so.1`, which is why a plain `docker run` logs
+`Cannot load libnvidia-encode.so.1`.
+
+**AMD VCE does not work on this image**, deliberately. HandBrake's `vce_*`
+encoders need AMD's proprietary AMF runtime (`libamfrt64.so`) from
+`amdgpu-pro`, which is not in the Ubuntu archive. They are compiled into the
+binary but will not initialise, and HandBrake logs `vcn: not available on this
+system`. The AMD override gives you VAAPI, not VCE.
 
 `HandBrakeCLI --help` only reports encoders available at *runtime*, not what
 was compiled in — so `/health`'s `encoders` list is a truthful reflection of
 what this specific machine can actually do. A GPU-less host legitimately
 reports software encoders only (`x264`, `x265`, `svt_av1`, ...); that is
-expected, not a misconfiguration. See `docs/build-spike-findings.md` for the
-full spike writeup.
+expected, not a misconfiguration.
+
+To debug a GPU host that reports no hardware encoders, `vainfo` is installed:
+
+```bash
+docker compose exec handbrake-encoder vainfo
+```
 
 ## Configuration
 
@@ -96,4 +121,30 @@ python -m pytest -v
 uvicorn app.main:app --host 0.0.0.0 --port 3335 --reload
 ```
 
-No test requires a GPU, HandBrake, or any media files.
+No test requires a GPU, HandBrake, or any media files — they all drive a
+scriptable fake HandBrakeCLI.
+
+That speed has a cost worth knowing about: the progress parser,
+`--preset-import-file`, and the derived output path are checked against a fake
+written by the same author as the code under test, so a shared misreading of
+HandBrake's real behaviour would pass the whole suite. `scripts/e2e_encode.py`
+closes that gap by running one real encode through the HTTP API, against real
+HandBrakeCLI and a preset exported from HandBrake itself. CI runs it on every
+push; to run it locally against a container:
+
+```bash
+mkdir -p /tmp/e2e && chmod 777 /tmp/e2e
+ffmpeg -y -f lavfi -i testsrc=duration=2:size=128x128:rate=10 \
+  -pix_fmt yuv420p /tmp/e2e/sample.mp4
+docker run --rm -v /tmp/e2e:/work --entrypoint HandBrakeCLI \
+  handbrake-video-encoder:latest -Z "Very Fast 1080p30" \
+  --preset-export "E2E x264" --preset-export-file /work/preset.json
+docker run -d --name hb-e2e -p 3335:3335 \
+  -e ENCODER_ALLOWED_ROOTS=/media1 -v /tmp/e2e:/media1 \
+  handbrake-video-encoder:latest
+python scripts/e2e_encode.py --media-dir /tmp/e2e --preset-file /tmp/e2e/preset.json
+docker rm -f hb-e2e
+```
+
+It covers the software x264 path only. Hardware encoders need real GPUs and
+stay a deployment check.
