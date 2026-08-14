@@ -1,0 +1,18 @@
+# AMD Radeon override — render device passthrough for VAAPI.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.amd.yml up -d
+#
+# READ THIS BEFORE EXPECTING vce_* TO WORK: HandBrake's VCE encoders need AMD's
+# proprietary AMF runtime (libamfrt64.so), which ships with amdgpu-pro and is
+# not in the Ubuntu archive. They are compiled into the binary but will not
+# initialise on the stock image — /health will not list them, and HandBrake
+# logs "vcn: not available on this system". This file gives AMD hosts working
+# VAAPI via mesa's radeonsi driver, not VCE. Making VCE work needs amdgpu-pro
+# layered into the image, which is deliberately out of scope.
+#
+# No /dev/kfd here, deliberately. That device is for ROCm *compute* — the
+# sibling Whisper_Lyric-Transcriber service needs it for PyTorch, and this one
+# does not. Video encode reaches the GPU through /dev/dri alone.
+services:
+  handbrake-encoder:
+    devices:
+      - /dev/dri:/dev/dri
