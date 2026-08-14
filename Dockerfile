@@ -49,6 +49,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       util-linux python3 python3-venv ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Vendor userspace drivers. libva2/libva-drm2 above are only the *API*; without
+# a driver behind them /usr/lib/x86_64-linux-gnu/dri is empty and every hardware
+# encoder fails at init even with /dev/dri passed through and a working GPU.
+# Verified against the noble archive before pinning these names.
+#
+#   intel-media-va-driver-non-free  iHD VA driver (QSV). The non-free build
+#                                   carries codecs the -free one omits.
+#   libmfx-gen1.2                   Intel oneVPL GPU Runtime — the actual QSV
+#                                   implementation for Gen12+ / Arc.
+#   libmfx1                         Legacy Media SDK runtime for Gen8-11.
+#   libvpl2                         oneVPL dispatcher; it only *finds* one of
+#                                   the two runtimes above, so it is not
+#                                   sufficient on its own.
+#   mesa-va-drivers                 radeonsi VAAPI, for AMD decode/VAAPI encode.
+#   vainfo                          Diagnostics. Tiny, and the first thing worth
+#                                   running when a GPU host reports no encoders.
+#
+# NVENC needs no package here: libnvidia-encode.so.1 is injected at runtime by
+# the NVIDIA container runtime (`--gpus`), which is why a plain `docker run`
+# logs "Cannot load libnvidia-encode.so.1" and is expected.
+#
+# AMD VCE is NOT made to work by this. HandBrake's vce_* encoders require AMD's
+# proprietary AMF runtime (libamfrt64.so) from amdgpu-pro, which is not in the
+# Ubuntu archive. Those encoders are compiled in but will not initialise on a
+# stock image; mesa-va-drivers gives AMD hosts VAAPI, not VCE. See README.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      intel-media-va-driver-non-free libmfx-gen1.2 libmfx1 libvpl2 \
+      mesa-va-drivers vainfo \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /src/build/HandBrakeCLI /usr/local/bin/HandBrakeCLI
 
 # PEP 668: Ubuntu's system Python is externally managed and refuses a bare
@@ -62,7 +92,26 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ app/
 COPY entrypoint.sh /entrypoint.sh
 
-RUN groupadd -g 1000 appgroup && \
+# Ubuntu 24.04 (unlike 22.04 and Debian) ships a stock `ubuntu` account holding
+# UID/GID 1000, which must go before appuser can take those ids.
+#
+# The build-time symptom is just "groupadd: GID '1000' already exists". The
+# runtime consequence is worse and is the real reason this matters: entrypoint.sh
+# force-remaps appuser onto PUID/PGID via `usermod -o` (allow-non-unique), so
+# both accounts end up on UID 1000; `setpriv --init-groups` then resolves that
+# shared UID back to "ubuntu" and loads ITS groups instead of appuser's,
+# silently dropping the render-group membership the entrypoint just granted for
+# /dev/dri. The service would start, look healthy, and report no GPU encoders.
+# Diagnosed in the sibling Whisper_Lyric-Transcriber service (commit 35ccb0b),
+# where the same base image hid the same collision behind a torch.xpu device
+# count of zero.
+#
+# So UID 1000 is not cosmetic: entrypoint.sh defaults PUID/PGID to it, outputs
+# land in a shared media library whose ownership must match the renamer's, and
+# it is the near-universal first-user id on the hosts this runs on.
+RUN userdel -r ubuntu 2>/dev/null || true; \
+    groupdel ubuntu 2>/dev/null || true; \
+    groupadd -g 1000 appgroup && \
     useradd -u 1000 -g appgroup -M -s /bin/false appuser && \
     chmod +x /entrypoint.sh
 
