@@ -14,8 +14,13 @@ from app.handbrake_runner import (
     run_encode,
 )
 
-_SPIKE_JSON = Path(__file__).resolve().parents[1] / "docs" / "spike" / "json-output.txt"
-_SPIKE_VERSION = Path(__file__).resolve().parents[1] / "docs" / "spike" / "version.txt"
+# Real HandBrakeCLI output, captured verbatim during the build spike. These are
+# the only fixtures in the suite that did not come from the same author as the
+# parser -- every other test drives the scriptable fake -- so they are the one
+# guard against the parser and its tests sharing a misreading of the real
+# format. Kept next to the tests because they are test data, not documentation.
+_SPIKE_JSON = Path(__file__).resolve().parent / "fixtures" / "json-output.txt"
+_SPIKE_VERSION = Path(__file__).resolve().parent / "fixtures" / "version.txt"
 
 
 # ---- argv building (pure) -------------------------------------------------
@@ -94,7 +99,7 @@ def test_parses_real_handbrake_output_verbatim(fake_handbrake):
     closing the nested "Working" object contains a brace while the outer
     object is still open. An implementation that clears its buffer on any
     brace-bearing line never completes the object and reports no progress
-    at all. This reads docs/spike/json-output.txt directly (rather than
+    at all. This reads tests/fixtures/json-output.txt directly (rather than
     embedding a hand-trimmed copy) so the test stays honestly "verbatim",
     including the leading Version record's own nested "Version": {...}
     object — a second brace-nesting level outside any Progress record,
@@ -284,7 +289,7 @@ def test_handbrake_info_reports_unavailable_when_run_raises_oserror(monkeypatch)
 
 
 def test_handbrake_info_parses_the_version_from_a_realistic_banner(monkeypatch):
-    """Uses the real banner shape captured in docs/spike/version.txt, whose
+    """Uses the real banner shape captured in tests/fixtures/version.txt, whose
     last line is "HandBrake 1.9.2" — HandBrakeCLI writes its startup log
     (including this line) to stderr, not stdout.
     """
