@@ -5,9 +5,11 @@ import pytest
 
 from app import config
 from app.paths import (
+    OUTPUT_PREFIX,
     PathNotAllowed,
     SourceNotFound,
     derive_output_path,
+    derive_staging_path,
     validate_source_path,
 )
 
@@ -132,3 +134,23 @@ def test_raises_path_not_allowed_when_config_roots_empty(tmp_path):
     with patch.object(config, "ALLOWED_ROOTS", []):
         with pytest.raises(PathNotAllowed):
             validate_source_path(str(movie))
+
+
+def test_staging_path_differs_from_the_published_path_and_keeps_the_prefix():
+    published = derive_output_path("/media1/Movies/x.mkv", "abc123", "mkv")
+    staging = derive_staging_path("/media1/Movies/x.mkv", "abc123", "mkv", "deadbeef")
+    assert staging != published
+    assert os.path.basename(staging) == ".hbenc-abc123-deadbeef.mkv"
+    # The renamer sweeps orphans by prefix; staging files must be collected too.
+    assert os.path.basename(staging).startswith(OUTPUT_PREFIX)
+    assert os.path.dirname(staging) == os.path.dirname(published)
+
+
+def test_staging_path_rejects_a_traversal_token():
+    with pytest.raises(PathNotAllowed):
+        derive_staging_path("/media1/Movies/x.mkv", "abc123", "mkv", "../../etc/x")
+
+
+def test_staging_path_rejects_an_empty_token():
+    with pytest.raises(PathNotAllowed):
+        derive_staging_path("/media1/Movies/x.mkv", "abc123", "mkv", "")

@@ -106,3 +106,126 @@ def test_rejects_a_job_id_that_makes_the_output_collide_with_the_source(source, 
             source_path=str(colliding_source), preset_json=PRESET_DOC, preset_name="P1"
         ))
     assert colliding_source.read_text() == "source bytes"
+
+
+# ---- output-path hijacking -------------------------------------------------
+#
+# The output path is derived rather than accepted precisely so a caller cannot
+# aim writes wherever it likes. A symlink pre-created at the derived path hands
+# that primitive straight back: HandBrake's -o follows it and writes through.
+# Reproduced against the real binary before this guard existed -- a 26-byte
+# decoy OUTSIDE the allowed roots was overwritten with 5018 bytes of video.
+#
+# Two layers guard it now: the encode goes to a staging name the caller cannot
+# predict, and publishing uses rename(), which replaces a symlink at the
+# destination instead of following it.
+
+
+def _encode_writing(content="encoded"):
+    def _run(cmd, *, on_progress, cancel_event, timeout=0):
+        dst = cmd[cmd.index("-o") + 1]
+        with open(dst, "w") as fh:
+            fh.write(content)
+    return _run
+
+
+def test_encode_writes_to_an_unpredictable_staging_name(source, monkeypatch):
+    """The path handed to HandBrake must not be the published one: knowing the
+    job id must not be enough to pre-place a symlink there."""
+    seen = {}
+
+    def _run(cmd, *, on_progress, cancel_event, timeout=0):
+        seen["dst"] = cmd[cmd.index("-o") + 1]
+        open(seen["dst"], "w").write("encoded")
+
+    monkeypatch.setattr(ops, "run_encode", _run)
+    job = Job(id="abc123")
+    ops.run_encode_job(job, EncodeRequest(
+        source_path=str(source), preset_json=PRESET_DOC, preset_name="P1"
+    ))
+    staged = os.path.basename(seen["dst"])
+    assert staged != ".hbenc-abc123.mkv"
+    assert staged.startswith(".hbenc-abc123-")   # sweep-by-prefix still holds
+    assert staged.endswith(".mkv")
+    # ...and the finished file lands at the published path.
+    assert os.path.basename(job.output_path) == ".hbenc-abc123.mkv"
+    assert open(job.output_path).read() == "encoded"
+
+
+def test_a_symlink_at_the_published_path_is_replaced_not_written_through(
+    source, monkeypatch
+):
+    """The attack Codex described, end to end."""
+    victim = source.parent / "victim.txt"
+    victim.write_text("PRECIOUS")
+    published = source.parent / ".hbenc-abc123.mkv"
+    try:
+        os.symlink(str(victim), str(published))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not available on this platform/account")
+
+    monkeypatch.setattr(ops, "run_encode", _encode_writing())
+    job = Job(id="abc123")
+    ops.run_encode_job(job, EncodeRequest(
+        source_path=str(source), preset_json=PRESET_DOC, preset_name="P1"
+    ))
+
+    assert victim.read_text() == "PRECIOUS", "symlink target must be untouched"
+    assert not os.path.islink(str(published)), "publish must replace the link"
+    assert published.read_text() == "encoded"
+
+
+def test_a_symlink_at_the_staging_path_is_refused(source, monkeypatch):
+    """Belt and braces: even if the staging name leaks, claiming it with
+    O_EXCL|O_NOFOLLOW refuses a pre-existing symlink rather than following it."""
+    victim = source.parent / "victim.txt"
+    victim.write_text("PRECIOUS")
+
+    monkeypatch.setattr(ops.secrets, "token_hex", lambda _n: "fixedtoken")
+    staged = source.parent / ".hbenc-abc123-fixedtoken.mkv"
+    try:
+        os.symlink(str(victim), str(staged))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not available on this platform/account")
+
+    monkeypatch.setattr(ops, "run_encode", _encode_writing())
+    job = Job(id="abc123")
+    with pytest.raises(ops.PathNotAllowed):
+        ops.run_encode_job(job, EncodeRequest(
+            source_path=str(source), preset_json=PRESET_DOC, preset_name="P1"
+        ))
+    assert victim.read_text() == "PRECIOUS"
+
+
+def test_a_swapped_staging_file_is_detected(source, monkeypatch):
+    """Closes the residual race: if the claimed file is unlinked and replaced
+    mid-encode, the result must not be published as if it were ours."""
+    monkeypatch.setattr(ops.secrets, "token_hex", lambda _n: "fixedtoken")
+    staged = source.parent / ".hbenc-abc123-fixedtoken.mkv"
+
+    def _swap(cmd, *, on_progress, cancel_event, timeout=0):
+        os.remove(str(staged))          # attacker unlinks our claimed file
+        open(str(staged), "w").write("attacker's file")
+
+    monkeypatch.setattr(ops, "run_encode", _swap)
+    job = Job(id="abc123")
+    with pytest.raises(ops.PathNotAllowed):
+        ops.run_encode_job(job, EncodeRequest(
+            source_path=str(source), preset_json=PRESET_DOC, preset_name="P1"
+        ))
+    assert not os.path.exists(str(source.parent / ".hbenc-abc123.mkv"))
+
+
+def test_a_failed_encode_leaves_no_staging_or_published_file(source, monkeypatch):
+    def fail(cmd, *, on_progress, cancel_event, timeout=0):
+        open(cmd[cmd.index("-o") + 1], "w").write("partial")
+        raise ops.HandBrakeError("boom")
+
+    monkeypatch.setattr(ops, "run_encode", fail)
+    job = Job(id="abc123")
+    with pytest.raises(ops.HandBrakeError):
+        ops.run_encode_job(job, EncodeRequest(
+            source_path=str(source), preset_json=PRESET_DOC, preset_name="P1"
+        ))
+    leftovers = [p for p in os.listdir(str(source.parent)) if p.startswith(".hbenc-")]
+    assert leftovers == []

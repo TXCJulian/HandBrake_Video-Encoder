@@ -90,3 +90,32 @@ def derive_output_path(source: str, job_id: str, extension: str) -> str:
         if not _SAFE_TOKEN.match(token):
             raise PathNotAllowed(f"Invalid {label}: {token!r}")
     return os.path.join(os.path.dirname(source), f"{OUTPUT_PREFIX}{job_id}.{extension}")
+
+
+def derive_staging_path(source: str, job_id: str, extension: str, token: str) -> str:
+    """Where the encode actually writes, before being published to its
+    :func:`derive_output_path` name.
+
+    The published path is predictable to anyone holding the job id, which the
+    caller is handed in the ``202``. That is enough to pre-create a symlink
+    there and have HandBrakeCLI's ``-o`` write through it to an arbitrary
+    target -- including one outside the allowed roots. *token* is fresh
+    randomness that is never returned to the caller, so the path HandBrake
+    opens cannot be guessed and therefore cannot be pre-empted.
+
+    Publishing is then a rename, which replaces a symlink sitting at the
+    destination rather than following it.
+
+    Keeps ``OUTPUT_PREFIX`` so the renamer's sweep-by-prefix still collects
+    these if the service dies mid-encode.
+    """
+    for label, value in (
+        ("job id", job_id),
+        ("extension", extension),
+        ("token", token),
+    ):
+        if not _SAFE_TOKEN.match(value):
+            raise PathNotAllowed(f"Invalid {label}: {value!r}")
+    return os.path.join(
+        os.path.dirname(source), f"{OUTPUT_PREFIX}{job_id}-{token}.{extension}"
+    )
