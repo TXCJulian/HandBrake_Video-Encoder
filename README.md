@@ -82,6 +82,8 @@ docker compose exec handbrake-encoder vainfo
 | `ENCODER_ALLOWED_ROOTS` | *(empty)* | Comma-separated roots. **Required** — with none set, every request is rejected with `403 path_not_allowed` and `/health` reports `degraded`. |
 | `ENCODER_WORKERS` | `1` | Concurrent encodes. Keep at 1 unless you know your NVENC session limit. |
 | `ENCODER_JOB_TTL` | `3600` | Completed-job eviction, in seconds. |
+| `ENCODER_MAX_QUEUE` | `100` | Jobs allowed to wait for a worker before `POST /jobs` refuses with `503 queue_full`. Bounds the backlog, not running jobs (already capped by `ENCODER_WORKERS`). Set `0` to disable. |
+| `ENCODER_MAX_BODY_BYTES` | `1000000` | Largest accepted request body. Real preset documents are a few KB. |
 | `HANDBRAKE_BIN` | `HandBrakeCLI` | Path to the binary. |
 | `PORT` | `3335` | HTTP port inside the container. |
 | `PUID` / `PGID` | `1000` | User the process runs as (applied by `entrypoint.sh`, not read by the app itself). Match your media share's owner. |
@@ -112,6 +114,8 @@ performs the swap itself — this service never modifies or deletes the source.
 | 404 | `source_not_found_on_encoder` | Mount paths differ between the machines. |
 | 404 | `job_not_found` | Unknown or already-deleted job. |
 | 409 | `encoder_unavailable` | The preset's encoder is not available on this machine right now. |
+| 413 | `request_too_large` | Body exceeds `ENCODER_MAX_BODY_BYTES`. |
+| 503 | `queue_full` | `ENCODER_MAX_QUEUE` jobs are already waiting. Transient — the service is healthy, just saturated — so a `Retry-After` header is sent and the request should be retried rather than treated as a failure. |
 | 503 | `service_unavailable` | The job queue is not running (service starting up or shutting down); the job was never accepted or stored, so there is no `job_id` to poll or delete. |
 
 ## Development

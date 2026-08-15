@@ -4,7 +4,7 @@ import time
 import pytest
 
 from app.handbrake_runner import HandBrakeCancelled
-from app.job_manager import Job, JobManager, JobStatus
+from app.job_manager import Job, JobManager, JobStatus, QueueFull
 
 
 def _wait_for(predicate, timeout=5.0):
@@ -212,3 +212,61 @@ def test_to_dict_exposes_the_client_contract():
     assert data["output_path"] == "/media1/.hbenc-abc.mkv"
     assert data["encoder_used"] == "nvenc_h264"
     assert data["progress"] == 0.0
+
+
+# ---- queue bound -----------------------------------------------------------
+#
+# Unbounded submission is a self-inflicted outage even without an attacker: a
+# looping caller queues jobs faster than one worker drains them, and each one
+# pins a Job in the store until the TTL sweep. Bounding the backlog turns that
+# into an immediate, retryable refusal.
+
+
+def test_submit_refuses_once_the_backlog_is_full():
+    m = JobManager(workers=1, max_queue=2)
+    m._running = True          # queue work without starting a worker to drain it
+    m.submit(lambda _j: None)
+    m.submit(lambda _j: None)
+    with pytest.raises(QueueFull):
+        m.submit(lambda _j: None)
+
+
+def test_a_refused_job_is_not_stored():
+    """A rejected submission must leave no trace to poll or sweep."""
+    m = JobManager(workers=1, max_queue=1)
+    m._running = True
+    m.submit(lambda _j: None)
+    before = len(m._jobs)
+    with pytest.raises(QueueFull):
+        m.submit(lambda _j: None)
+    assert len(m._jobs) == before
+
+
+def test_draining_the_queue_frees_capacity():
+    """The bound is on work *waiting*, so a drained job must free its slot."""
+    m = JobManager(workers=1, max_queue=1)
+    m.start()
+    try:
+        done = threading.Event()
+        m.submit(lambda _j: done.set())
+        assert done.wait(timeout=5)
+        for _ in range(50):
+            try:
+                m.submit(lambda _j: None)
+                break
+            except QueueFull:
+                time.sleep(0.05)
+        else:
+            pytest.fail("capacity was never released after the job drained")
+    finally:
+        m.shutdown()
+
+
+def test_shutdown_still_completes_with_a_full_backlog():
+    """Regression: bounding the queue must not let shutdown's sentinels block
+    behind pending work and hang the lifespan."""
+    m = JobManager(workers=1, max_queue=2)
+    m._running = True
+    m.submit(lambda _j: None)
+    m.submit(lambda _j: None)
+    m.shutdown()   # must return, not block

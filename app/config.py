@@ -27,3 +27,22 @@ HANDBRAKE_BIN: str = os.getenv("HANDBRAKE_BIN", "HandBrakeCLI")
 WORKERS: int = int(os.getenv("ENCODER_WORKERS", "1"))
 JOB_TTL_SECONDS: int = int(os.getenv("ENCODER_JOB_TTL", "3600"))
 PORT: int = int(os.getenv("PORT", "3335"))
+
+MAX_QUEUE: int = int(os.getenv("ENCODER_MAX_QUEUE", "100"))
+"""How many jobs may be waiting for a worker before submissions are refused.
+
+Bounds the backlog, not the store: running jobs are already limited by
+``WORKERS``, and finished ones are cleared by the TTL sweep. Without it a
+caller looping faster than a single worker drains — a bug, not necessarily an
+attack — queues jobs indefinitely, each pinning a Job in memory until its TTL
+expires. Refusing with 503 immediately is far easier to diagnose than a service
+that accepts everything and falls further behind.
+"""
+
+MAX_BODY_BYTES: int = int(os.getenv("ENCODER_MAX_BODY_BYTES", "1000000"))
+"""Largest accepted request body.
+
+``preset_json`` is an unbounded dict otherwise, parsed into memory before any
+route check runs. Real HandBrake preset documents are a few KB — a full export
+of every built-in preset is well under 100KB — so 1MB is generous.
+"""

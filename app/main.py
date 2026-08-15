@@ -12,7 +12,8 @@ from starlette.exceptions import HTTPException as _HTTPException
 
 from app import config, encoders
 from app.handbrake_runner import handbrake_info
-from app.job_manager import Job, manager
+from app.job_manager import Job, QueueFull, manager
+from app.limits import BodySizeLimitMiddleware
 from app.models import EncodeRequest
 from app.ops import run_encode_job
 from app.paths import PathNotAllowed, SourceNotFound, validate_source_path
@@ -64,6 +65,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="HandBrake Video Encoder", version="0.1.0", lifespan=lifespan)
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=config.MAX_BODY_BYTES)
 
 
 @app.exception_handler(_HTTPException)
@@ -210,7 +212,17 @@ def post_job(req: EncodeRequest) -> dict:
             },
         )
 
-    job = manager.submit(lambda j: run_encode_job(j, req))
+    try:
+        job = manager.submit(lambda j: run_encode_job(j, req))
+    except QueueFull as exc:
+        # Transient and retryable, unlike the other 503 below: the service is
+        # healthy, just saturated. Retry-After gives the renamer something to
+        # honour instead of hot-looping the endpoint that is already behind.
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "queue_full", "reason": str(exc)},
+            headers={"Retry-After": "60"},
+        ) from exc
     if manager.get(job.id) is None:
         # submit() marks a job FAILED without storing it when the manager is
         # not running (during/after shutdown) - that is the correct signal

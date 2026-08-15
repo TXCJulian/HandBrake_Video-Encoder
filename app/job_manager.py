@@ -30,6 +30,15 @@ class JobStatus(str, Enum):
 _TERMINAL = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
 
 
+class QueueFull(RuntimeError):
+    """Raised by :meth:`JobManager.submit` when the backlog is at its limit.
+
+    An exception rather than a FAILED job (the shape used for "not running"),
+    because this is a transient capacity condition the caller should retry —
+    not an outcome worth storing and polling.
+    """
+
+
 @dataclass
 class Job:
     """Concurrency invariant: single-writer — only the worker thread owning
@@ -79,14 +88,27 @@ class Job:
 
 
 class JobManager:
-    def __init__(self, workers: int | None = None, ttl_seconds: int | None = None):
+    def __init__(
+        self,
+        workers: int | None = None,
+        ttl_seconds: int | None = None,
+        max_queue: int | None = None,
+    ):
         self._workers = workers if workers is not None else config.WORKERS
         self._ttl = ttl_seconds if ttl_seconds is not None else config.JOB_TTL_SECONDS
+        self._max_queue = max_queue if max_queue is not None else config.MAX_QUEUE
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
+        # Deliberately unbounded, with the limit enforced by _pending in
+        # submit() instead. A queue.Queue(maxsize=...) would make shutdown()'s
+        # sentinel put() block behind a full backlog and hang the lifespan --
+        # the sentinels must always get through.
         self._queue: "queue.Queue[tuple[Job, Callable[[Job], None]] | None]" = (
             queue.Queue()
         )
+        # Jobs enqueued but not yet picked up by a worker. Running jobs are not
+        # counted: they are already bounded by the worker count.
+        self._pending = 0
         self._threads: list[threading.Thread] = []
         self._running = False
 
@@ -148,6 +170,14 @@ class JobManager:
                 job.error = "Service is shutting down; job not accepted"
                 job.status = JobStatus.FAILED
                 return job
+            if self._max_queue > 0 and self._pending >= self._max_queue:
+                # Refused before the job is stored, so nothing is left behind
+                # to poll, sweep, or leak.
+                raise QueueFull(
+                    f"{self._pending} job(s) already waiting for a worker "
+                    f"(limit {self._max_queue})"
+                )
+            self._pending += 1
             self._jobs[job.id] = job
         self._queue.put((job, fn))
         return job
@@ -209,6 +239,10 @@ class JobManager:
             if item is None:
                 return
             job, fn = item
+            # The job has left the backlog: free its slot before running it,
+            # so the bound covers work *waiting*, not work in progress.
+            with self._lock:
+                self._pending -= 1
             if not self._claim(job):
                 # finished_at before status, so any thread observing a
                 # terminal status also observes a populated finished_at.

@@ -388,3 +388,61 @@ def test_post_jobs_checks_the_preset_against_its_own_encoder(client, monkeypatch
     monkeypatch.setattr(encoders, "encoder_presets", _presets)
     _post(c, media, _doc(encoder="qsv_h265", video_preset="balanced"))
     assert asked == ["qsv_h265"]
+
+
+# ---- capacity and body limits ----------------------------------------------
+
+
+def test_post_jobs_returns_503_queue_full_when_the_backlog_is_full(client, monkeypatch):
+    """Saturation must be an immediate, retryable refusal rather than an
+    ever-growing backlog. Distinct from the shutdown 503: the service is
+    healthy here, just busy."""
+    c, media = client
+    monkeypatch.setattr(main.manager, "_max_queue", 1)
+    monkeypatch.setattr(main.manager, "_pending", 1)   # already at the limit
+    r = c.post("/jobs", json={
+        "source_path": str(media / "movie.mkv"),
+        "preset_json": PRESET_DOC,
+        "preset_name": "P1",
+    })
+    assert r.status_code == 503
+    assert r.json()["code"] == "queue_full"
+    assert r.headers["Retry-After"] == "60"
+
+
+def test_a_refused_submission_leaves_no_job_behind(client, monkeypatch):
+    c, media = client
+    monkeypatch.setattr(main.manager, "_max_queue", 1)
+    monkeypatch.setattr(main.manager, "_pending", 1)
+    before = len(main.manager._jobs)
+    c.post("/jobs", json={
+        "source_path": str(media / "movie.mkv"),
+        "preset_json": PRESET_DOC,
+        "preset_name": "P1",
+    })
+    assert len(main.manager._jobs) == before
+
+
+def test_an_oversized_body_is_rejected_before_the_route_runs(client, monkeypatch):
+    """preset_json is an unbounded dict; without a cap it is parsed into memory
+    before any path or encoder check can reject it."""
+    c, media = client
+    huge = {"PresetList": [{"PresetName": "P1", "VideoEncoder": "x264",
+                            "FileFormat": "av_mkv", "pad": "x" * 2_000_000}]}
+    r = c.post("/jobs", json={
+        "source_path": str(media / "movie.mkv"),
+        "preset_json": huge,
+        "preset_name": "P1",
+    })
+    assert r.status_code == 413
+    assert r.json()["code"] == "request_too_large"
+
+
+def test_a_normal_body_is_unaffected(client):
+    c, media = client
+    r = c.post("/jobs", json={
+        "source_path": str(media / "movie.mkv"),
+        "preset_json": PRESET_DOC,
+        "preset_name": "P1",
+    })
+    assert r.status_code == 202
