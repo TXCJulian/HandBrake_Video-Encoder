@@ -1,0 +1,8 @@
+-r requirements.txt
+
+pytest==9.1.1
+
+# starlette 1.6.0's TestClient requires httpx2 and refuses to import without it.
+# Older starlette (<=0.52) wanted plain httpx instead, which is why an unpinned
+# install passed locally and failed in CI. Pin both sides so they cannot drift.
+httpx2==2.10.0

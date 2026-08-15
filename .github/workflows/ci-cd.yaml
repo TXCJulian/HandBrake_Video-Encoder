@@ -1,0 +1,143 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/txcjulian/handbrake-video-encoder
+
+jobs:
+  unit-test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Matches the runtime image: Ubuntu 24.04 ships Python 3.12.
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -v
+
+  # Builds the image once, proves it can actually encode, and only then
+  # publishes that same build. Unlike every test in tests/ -- which drives a
+  # scriptable fake HandBrakeCLI -- this runs the real binary end to end, so a
+  # shared misreading between the progress parser and its fake cannot slip
+  # through. See scripts/e2e_encode.py.
+  build-test-publish:
+    name: Build, encode test, publish
+    runs-on: ubuntu-latest
+    needs: unit-test
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # linux/amd64 only, deliberately. The Dockerfile disables NVENC/QSV/VCE
+      # on arm64 (they are amd64-only), so an arm64 image would be a CPU-only
+      # x264 encoder -- the opposite of this service's purpose -- and building
+      # it would mean a QEMU-emulated HandBrake source compile measured in
+      # hours. The sibling services are multi-arch; this one is not, on purpose.
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: handbrake-video-encoder:ci
+          # HandBrake is compiled from source, which is ~30-60 min cold. Without
+          # this cache every push would pay that again.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Not assumed to be preinstalled on the runner image.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Generate a source clip and a real preset
+        run: |
+          set -eux
+          mkdir -p /tmp/e2e
+          # The container runs as uid 1000 and must write its output here.
+          chmod 777 /tmp/e2e
+          ffmpeg -y -f lavfi -i testsrc=duration=2:size=128x128:rate=10 \
+            -pix_fmt yuv420p /tmp/e2e/sample.mp4
+          # Exported from HandBrake itself rather than hand-written: a stub
+          # preset would reintroduce exactly the blind spot this job exists to
+          # close.
+          docker run --rm -v /tmp/e2e:/work \
+            --entrypoint HandBrakeCLI handbrake-video-encoder:ci \
+            -Z "Very Fast 1080p30" \
+            --preset-export "E2E x264" --preset-export-file /work/preset.json
+          test -s /tmp/e2e/preset.json
+
+      - name: Start the service
+        run: |
+          docker run -d --name hb-e2e -p 3335:3335 \
+            -e ENCODER_ALLOWED_ROOTS=/media1 \
+            -v /tmp/e2e:/media1 \
+            handbrake-video-encoder:ci
+
+      - name: Run the end-to-end encode
+        run: python scripts/e2e_encode.py --media-dir /tmp/e2e --preset-file /tmp/e2e/preset.json
+
+      - name: Service logs
+        if: always()
+        run: docker logs hb-e2e || true
+
+      - name: Stop the service
+        if: always()
+        run: docker rm -f hb-e2e || true
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Re-runs build-push-action against the same cache, so this is an export
+      # of the image just tested rather than a second compile.
+      - name: Publish image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name == 'master' && 'latest' || 'beta' }}
+          cache-from: type=gha

@@ -1,0 +1,14 @@
+# Intel Arc / iGPU override — QSV via the render device.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d
+#
+# The image already carries the iHD driver and the oneVPL GPU runtime, so
+# passing the device through is all that is needed. The entrypoint joins
+# appuser to the host's render group automatically by matching the GID of
+# /dev/dri/renderD*, so no group_add entry is required here.
+#
+# Verify with: docker compose exec handbrake-encoder vainfo
+# and confirm /health lists qsv_* encoders.
+services:
+  handbrake-encoder:
+    devices:
+      - /dev/dri:/dev/dri

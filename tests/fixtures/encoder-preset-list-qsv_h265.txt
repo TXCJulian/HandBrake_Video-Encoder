@@ -1,0 +1,12 @@
+[07:27:14] Compile-time hardening features are enabled
+Cannot load libnvidia-encode.so.1
+[07:27:14] vcn: not available on this system
+[07:27:14] qsv: not available on this system
+[07:27:14] hb_init: starting libhb thread
+[07:27:14] thread 7457daeea6c0 started ("libhb")
+Available --encoder-preset values for 'qsv_h265' encoder:
+    speed
+    balanced
+    quality
+HandBrake has exited.
+

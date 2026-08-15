@@ -1,0 +1,56 @@
+# Pull-based deployment: runs the published image instead of building locally.
+#
+# Use this INSTEAD OF docker-compose.yml (not alongside it) -- docker-compose.yml
+# carries a `build:` section, which would make `up` compile HandBrake from source
+# on a host that only meant to pull. Combine with a vendor override as needed:
+#
+#   docker compose -f docker-compose.ghcr.yml up -d                                   # CPU
+#   docker compose -f docker-compose.ghcr.yml -f docker-compose.nvidia.yml up -d      # NVIDIA
+#   docker compose -f docker-compose.ghcr.yml -f docker-compose.intel.yml up -d       # Intel QSV
+#   docker compose -f docker-compose.ghcr.yml -f docker-compose.amd.yml up -d         # AMD (VAAPI)
+#
+# Everything is overridable from the environment or a .env file:
+#
+#   ENCODER_TAG          image tag           (default: latest; use `beta` for the
+#                                             branch build)
+#   ENCODER_HOST_MEDIA   host media path     (default: ./media)
+#   ENCODER_ROOT         in-container path   (default: /media1)
+#   PUID / PGID          output ownership    (default: 1000/1000)
+#
+# ENCODER_ROOT is used for BOTH the mount point and the allowlist on purpose:
+# they must match, or every request is rejected with 403 path_not_allowed. When
+# pairing this with the renamer, ENCODER_ROOT must equal the path the renamer
+# sends -- a mismatch there surfaces as 404 source_not_found_on_encoder.
+services:
+  handbrake-encoder:
+    image: ghcr.io/txcjulian/handbrake-video-encoder:${ENCODER_TAG:-latest}
+    # Without this, a stale local image with the same tag is reused silently and
+    # you verify yesterday's build.
+    pull_policy: always
+    container_name: handbrake-encoder
+    restart: unless-stopped
+
+    ports:
+      - "3335:3335"
+
+    environment:
+      ENCODER_ALLOWED_ROOTS: "${ENCODER_ROOT:-/media1}"
+      ENCODER_WORKERS: "1"
+      ENCODER_JOB_TTL: "3600"
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      UMASK: "022"
+
+    volumes:
+      - ${ENCODER_HOST_MEDIA:-./media}:${ENCODER_ROOT:-/media1}
+
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:3335/health').read()
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
