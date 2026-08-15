@@ -1,0 +1,10 @@
+[07:27:40] Compile-time hardening features are enabled
+Cannot load libnvidia-encode.so.1
+[07:27:40] vcn: not available on this system
+[07:27:40] qsv: not available on this system
+[07:27:40] hb_init: starting libhb thread
+[07:27:40] thread 758bd24366c0 started ("libhb")
+Available --encoder-preset values for 'theora' encoder:
+    Option not supported by encoder
+HandBrake has exited.
+

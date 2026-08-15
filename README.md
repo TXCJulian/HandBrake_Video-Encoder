@@ -107,6 +107,7 @@ performs the swap itself — this service never modifies or deletes the source.
 | Status | `code` | Meaning |
 | --- | --- | --- |
 | 400 | `preset_not_found` | No such preset in the supplied document, or its container format is unsupported. |
+| 400 | `invalid_video_preset` | The preset's `VideoPreset` is not one the encoder accepts. Speed presets are encoder-specific (x264 takes `ultrafast`…`placebo`, QSV takes `speed`/`balanced`/`quality`, NVENC takes `fastest`…`slowest`), so this is a malformed preset rather than a capability limit — it would fail on any machine. The response carries `valid_presets` so the caller can correct it without guessing. Presets omitting `VideoPreset` are fine; HandBrake uses the encoder's default. |
 | 403 | `path_not_allowed` | Path resolves outside `ENCODER_ALLOWED_ROOTS`. |
 | 404 | `source_not_found_on_encoder` | Mount paths differ between the machines. |
 | 404 | `job_not_found` | Unknown or already-deleted job. |
@@ -134,7 +135,10 @@ push; to run it locally against a container:
 
 ```bash
 mkdir -p /tmp/e2e && chmod 777 /tmp/e2e
-ffmpeg -y -f lavfi -i testsrc=duration=2:size=128x128:rate=10 \
+# Keep this at 640x360 or larger. The hardware encoders reject small frames
+# (NVENC H.265 needs >=129px wide, H.264 >=145), and a too-small clip fails in
+# a way that looks like broken GPU passthrough.
+ffmpeg -y -f lavfi -i testsrc=duration=3:size=640x360:rate=24 \
   -pix_fmt yuv420p /tmp/e2e/sample.mp4
 docker run --rm -v /tmp/e2e:/work --entrypoint HandBrakeCLI \
   handbrake-video-encoder:latest -Z "Very Fast 1080p30" \

@@ -61,6 +61,23 @@ def preset_encoder(preset: dict) -> str:
     return encoder
 
 
+def preset_video_preset(preset: dict) -> str:
+    """The encoder *speed* preset a preset asks for, e.g. ``veryfast``.
+
+    Distinct from the preset's own name: this is HandBrake's
+    ``--encoder-preset``, whose valid values depend on the encoder (x264 takes
+    ``ultrafast..placebo``, QSV takes ``speed/balanced/quality``).
+
+    Returns ``""`` rather than raising when absent, blank, or not a string.
+    Omitting it is legal -- HandBrake falls back to the encoder's own default
+    -- so a missing value must not be reported as a malformed preset.
+    """
+    value = preset.get("VideoPreset")
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
 def preset_extension(preset: dict) -> str:
     """The file extension the output must use, from the preset's muxer.
 

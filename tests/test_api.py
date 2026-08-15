@@ -35,6 +35,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main.config, "ALLOWED_ROOTS", [str(media)])
     monkeypatch.setattr(ops.config, "ALLOWED_ROOTS", [str(media)])
     monkeypatch.setattr(encoders, "available_encoders", lambda: ["x264"])
+    # Default to "could not determine", the fail-open case, so tests that are
+    # not about speed presets never spawn a real HandBrakeCLI probe. Tests
+    # that do care override this.
+    monkeypatch.setattr(encoders, "encoder_presets", lambda _e: [])
     monkeypatch.setattr(ops, "run_encode", lambda *a, **k: None)
     # Uses the real lifespan (manager.start()/shutdown(), the encoder
     # warm-up thread, the sweep loop) rather than hand-rolling
@@ -303,3 +307,84 @@ def test_delete_removes_an_existing_job(client):
 
     assert c.delete(f"/jobs/{job_id}").status_code == 204
     assert c.get(f"/jobs/{job_id}").status_code == 404
+
+
+# ---- speed-preset validation ----------------------------------------------
+#
+# A preset pairing an x264 speed preset with a QSV encoder is internally
+# inconsistent and fails on ANY machine, so it is a 400 rather than the 409
+# used for "this machine cannot do that". Caught before queueing because the
+# alternative -- discovered only when the worker runs -- is exactly what bit
+# the first real QSV encode: HandBrake dies with
+# "hb_qsv_param_default_preset: invalid preset 'veryfast'".
+
+
+def _doc(encoder="x264", video_preset=None):
+    leaf = {"PresetName": "P1", "VideoEncoder": encoder, "FileFormat": "av_mkv"}
+    if video_preset is not None:
+        leaf["VideoPreset"] = video_preset
+    return {"PresetList": [leaf]}
+
+
+def _post(c, media, doc):
+    return c.post("/jobs", json={
+        "source_path": str(media / "movie.mkv"),
+        "preset_json": doc,
+        "preset_name": "P1",
+    })
+
+
+def test_post_jobs_rejects_a_speed_preset_the_encoder_does_not_accept(
+    client, monkeypatch
+):
+    c, media = client
+    monkeypatch.setattr(
+        encoders, "encoder_presets", lambda _e: ["speed", "balanced", "quality"]
+    )
+    r = _post(c, media, _doc(video_preset="veryfast"))
+    assert r.status_code == 400
+    body = r.json()
+    assert body["code"] == "invalid_video_preset"
+    # The caller must be able to correct itself without guessing.
+    assert body["valid_presets"] == ["speed", "balanced", "quality"]
+    assert "veryfast" in body["reason"]
+
+
+def test_post_jobs_accepts_a_valid_speed_preset(client, monkeypatch):
+    c, media = client
+    monkeypatch.setattr(
+        encoders, "encoder_presets", lambda _e: ["speed", "balanced", "quality"]
+    )
+    assert _post(c, media, _doc(video_preset="balanced")).status_code == 202
+
+
+def test_post_jobs_accepts_a_preset_with_no_speed_preset(client, monkeypatch):
+    """Omitting VideoPreset is legal -- HandBrake uses the encoder default."""
+    c, media = client
+    monkeypatch.setattr(
+        encoders, "encoder_presets", lambda _e: ["speed", "balanced", "quality"]
+    )
+    assert _post(c, media, _doc()).status_code == 202
+
+
+def test_post_jobs_fails_open_when_the_preset_probe_is_empty(client, monkeypatch):
+    """An encoder with no presets (theora) and a failed probe are
+    indistinguishable, so an unknown answer must not block the encode."""
+    c, media = client
+    monkeypatch.setattr(encoders, "encoder_presets", lambda _e: [])
+    assert _post(c, media, _doc(video_preset="anything")).status_code == 202
+
+
+def test_post_jobs_checks_the_preset_against_its_own_encoder(client, monkeypatch):
+    """The probe must be for the preset's encoder, not a hardcoded one."""
+    asked: list[str] = []
+
+    def _presets(encoder):
+        asked.append(encoder)
+        return ["speed", "balanced", "quality"]
+
+    c, media = client
+    monkeypatch.setattr(encoders, "available_encoders", lambda: ["x264", "qsv_h265"])
+    monkeypatch.setattr(encoders, "encoder_presets", _presets)
+    _post(c, media, _doc(encoder="qsv_h265", video_preset="balanced"))
+    assert asked == ["qsv_h265"]

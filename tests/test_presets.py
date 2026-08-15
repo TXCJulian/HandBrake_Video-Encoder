@@ -6,6 +6,7 @@ from app.presets import (
     iter_presets,
     preset_encoder,
     preset_extension,
+    preset_video_preset,
 )
 
 DOC = {
@@ -92,3 +93,24 @@ def test_preset_extension_raises_when_absent():
 
 def test_iter_presets_of_an_empty_document_is_empty():
     assert iter_presets({}) == []
+
+
+def test_video_preset_returns_the_speed_preset():
+    assert preset_video_preset({"VideoPreset": "veryfast"}) == "veryfast"
+
+
+def test_video_preset_is_empty_when_absent():
+    """Absence is legal: HandBrake picks its own default, so it must not be
+    treated as a validation failure."""
+    assert preset_video_preset({"PresetName": "x"}) == ""
+
+
+def test_video_preset_is_empty_when_blank_or_wrong_type():
+    assert preset_video_preset({"VideoPreset": ""}) == ""
+    assert preset_video_preset({"VideoPreset": "   "}) == ""
+    assert preset_video_preset({"VideoPreset": None}) == ""
+    assert preset_video_preset({"VideoPreset": 7}) == ""
+
+
+def test_video_preset_is_stripped():
+    assert preset_video_preset({"VideoPreset": " balanced "}) == "balanced"

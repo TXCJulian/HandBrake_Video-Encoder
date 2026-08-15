@@ -16,7 +16,13 @@ from app.job_manager import Job, manager
 from app.models import EncodeRequest
 from app.ops import run_encode_job
 from app.paths import PathNotAllowed, SourceNotFound, validate_source_path
-from app.presets import PresetError, find_preset, preset_encoder, preset_extension
+from app.presets import (
+    PresetError,
+    find_preset,
+    preset_encoder,
+    preset_extension,
+    preset_video_preset,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -169,6 +175,38 @@ def post_job(req: EncodeRequest) -> dict:
                     f"build does not provide. Available: {encoders.available_encoders()}"
                 ),
                 "encoder": encoder,
+            },
+        )
+
+    # Speed presets are encoder-specific vocabularies: x264 takes
+    # ultrafast..placebo, QSV takes speed/balanced/quality, NVENC takes
+    # fastest..slowest. A preset that pairs one encoder's speed preset with
+    # another's encoder is internally inconsistent and fails on ANY machine,
+    # so it is a 400 rather than the 409 used for "this machine cannot".
+    #
+    # 400 rather than an async failure because HandBrake's own diagnosis of it
+    # ("hb_qsv_param_default_preset: invalid preset 'veryfast'") only surfaces
+    # once the worker runs, which the caller can reach only by polling.
+    #
+    # An empty list means "could not determine" -- an encoder with no presets
+    # at all (theora, mpeg2) is indistinguishable from a failed probe -- and
+    # must not block the encode. HandBrake still rejects a genuinely bad value
+    # downstream, exactly as it did before this check existed.
+    video_preset = preset_video_preset(preset)
+    valid_presets = encoders.encoder_presets(encoder)
+    if video_preset and valid_presets and video_preset not in valid_presets:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_video_preset",
+                "reason": (
+                    f"Preset {req.preset_name!r} asks for speed preset "
+                    f"{video_preset!r}, which encoder {encoder!r} does not accept. "
+                    f"Valid: {valid_presets}"
+                ),
+                "encoder": encoder,
+                "video_preset": video_preset,
+                "valid_presets": valid_presets,
             },
         )
 
