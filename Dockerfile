@@ -52,16 +52,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Vendor userspace drivers. libva2/libva-drm2 above are only the *API*; without
 # a driver behind them /usr/lib/x86_64-linux-gnu/dri is empty and every hardware
 # encoder fails at init even with /dev/dri passed through and a working GPU.
-# Verified against the noble archive before pinning these names.
+#
+# The Intel media stack comes from Intel's PPA, NOT Ubuntu's archive. Noble
+# ships intel-media-va-driver-non-free 24.1.0 and libmfx-gen1.2 23.2.3, both of
+# which predate Battlemage (Arc B580, launched after they were cut), so QSV
+# simply would not come up on that card. The PPA carries 26.2.2. This is the
+# same source the sibling Whisper_Lyric-Transcriber service had to adopt for
+# Battlemage (e09d81e), there for the compute stack rather than the media one.
+#   https://dgpu-docs.intel.com/installation-guides/installing-packages-from-the-intel-ppa.html
 #
 #   intel-media-va-driver-non-free  iHD VA driver (QSV). The non-free build
 #                                   carries codecs the -free one omits.
 #   libmfx-gen1.2                   Intel oneVPL GPU Runtime — the actual QSV
-#                                   implementation for Gen12+ / Arc.
-#   libmfx1                         Legacy Media SDK runtime for Gen8-11.
-#   libvpl2                         oneVPL dispatcher; it only *finds* one of
-#                                   the two runtimes above, so it is not
-#                                   sufficient on its own.
+#                                   implementation for Gen12+ / Arc / Battlemage.
+#   libvpl2                         oneVPL dispatcher; it only *finds* a runtime,
+#                                   so it is not sufficient on its own.
+#   libmfx1                         Legacy Media SDK runtime for Gen8-11. Stays
+#                                   on the archive version; the PPA does not
+#                                   carry it and those parts are long stable.
 #   mesa-va-drivers                 radeonsi VAAPI, for AMD decode/VAAPI encode.
 #   vainfo                          Diagnostics. Tiny, and the first thing worth
 #                                   running when a GPU host reports no encoders.
@@ -75,8 +83,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Ubuntu archive. Those encoders are compiled in but will not initialise on a
 # stock image; mesa-va-drivers gives AMD hosts VAAPI, not VCE. See README.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      intel-media-va-driver-non-free libmfx-gen1.2 libmfx1 libvpl2 \
-      mesa-va-drivers vainfo \
+      software-properties-common \
+    && add-apt-repository -y ppa:kobuk-team/intel-graphics \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      intel-media-va-driver-non-free libmfx-gen1.2 libvpl2 \
+      libmfx1 mesa-va-drivers vainfo \
+    && apt-get purge -y software-properties-common \
+    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/build/HandBrakeCLI /usr/local/bin/HandBrakeCLI
