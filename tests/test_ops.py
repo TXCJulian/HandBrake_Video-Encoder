@@ -197,9 +197,26 @@ def test_a_symlink_at_the_staging_path_is_refused(source, monkeypatch):
     assert victim.read_text() == "PRECIOUS"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "Windows refuses to unlink a file with an open descriptor, so the swap "
+        "this test simulates cannot happen there -- the OS blocks it outright. "
+        "The service only runs on Linux, where the unlink succeeds and the "
+        "held descriptor is what makes the swap detectable."
+    ),
+)
 def test_a_swapped_staging_file_is_detected(source, monkeypatch):
     """Closes the residual race: if the claimed file is unlinked and replaced
-    mid-encode, the result must not be published as if it were ours."""
+    mid-encode, the result must not be published as if it were ours.
+
+    The detection rests on the descriptor being held open across the encode,
+    not on comparing a stat() before and after: Linux readily hands a freshly
+    created file the inode number it just freed, so a before/after comparison
+    misses precisely the case it is meant to catch. Verified -- this test
+    failed on Linux against that earlier implementation while passing on
+    Windows, whose inode numbers differ.
+    """
     monkeypatch.setattr(ops.secrets, "token_hex", lambda _n: "fixedtoken")
     staged = source.parent / ".hbenc-abc123-fixedtoken.mkv"
 

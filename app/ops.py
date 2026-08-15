@@ -24,6 +24,8 @@ from app.presets import PresetError, find_preset, preset_encoder, preset_extensi
 
 logger = logging.getLogger(__name__)
 
+_CLOSED = -1
+
 
 def run_encode_job(job: Job, req: EncodeRequest) -> None:
     """Encode one file. Raises on failure; the job manager records the outcome.
@@ -65,9 +67,15 @@ def run_encode_job(job: Job, req: EncodeRequest) -> None:
 
     # O_EXCL|O_NOFOLLOW so the claim fails rather than follows if anything at
     # all already sits there -- belt and braces, in case the staging name ever
-    # becomes guessable. Keeping the identity lets the file be re-checked after
-    # the encode: HandBrakeCLI truncates in place rather than recreating, so a
-    # changed inode means someone swapped the path underneath us.
+    # becomes guessable.
+    #
+    # The descriptor is deliberately held open for the whole encode rather than
+    # closed here. It is the anchor for the tamper check below: an inode with
+    # an open descriptor cannot be freed, so if the path is unlinked and
+    # replaced, the new file is guaranteed a different inode. Comparing a
+    # stat() taken before and after instead would miss the swap outright --
+    # Linux readily reuses a just-freed inode number for the next file created
+    # in the same directory, which is exactly what a replacement is.
     try:
         fd = os.open(
             staging,
@@ -78,10 +86,6 @@ def run_encode_job(job: Job, req: EncodeRequest) -> None:
         raise PathNotAllowed(
             f"Could not claim the staging output path: {exc.strerror}"
         ) from exc
-    try:
-        claimed = os.fstat(fd)
-    finally:
-        os.close(fd)
 
     job.encoder_used = encoder
     # The path the finished file will occupy. It does not exist until the
@@ -97,7 +101,7 @@ def run_encode_job(job: Job, req: EncodeRequest) -> None:
     handle = tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", encoding="utf-8", delete=False
     )
-    try:
+    try:  # noqa: PLR1702 - the claimed fd must outlive the encode; see os.close below
         # close() lives in its own finally, separate from the outer one that
         # unlinks: if json.dump raises (non-serialisable document, ENOSPC),
         # the handle must still be closed here, or os.unlink below raises
@@ -114,22 +118,40 @@ def run_encode_job(job: Job, req: EncodeRequest) -> None:
                 on_progress=lambda pct: setattr(job, "progress", pct),
                 cancel_event=job.cancel_event,
             )
-            written = os.stat(staging)
-            if (written.st_dev, written.st_ino) != (claimed.st_dev, claimed.st_ino):
+            # samestat against the still-open descriptor, not against a stat
+            # captured earlier: holding the descriptor keeps the original inode
+            # alive, so a file that replaced ours cannot have inherited its
+            # inode number.
+            if not os.path.samestat(os.fstat(fd), os.stat(staging)):
                 # The claimed file was unlinked and replaced while HandBrake
                 # ran. Whatever is there now is not what this job produced, so
                 # it must not be published under the job's output path.
                 raise PathNotAllowed(
                     "Staging output was replaced during the encode; refusing to publish"
                 )
+            # Released only now: the check above needed it, and Windows -- where
+            # the test suite runs, though the service itself does not -- refuses
+            # to rename a file that still has an open descriptor.
+            os.close(fd)
+            fd = _CLOSED
             os.replace(staging, dst)
         except BaseException:
             # Covers failure and cancellation alike: a partial output must
             # never be left behind for the caller to mistake for a finished
             # encode. The source is untouched either way.
+            #
+            # The claim is dropped first: Windows refuses to unlink a file that
+            # still has an open descriptor, which would turn a clean failure
+            # into a leaked staging file.
+            if fd != _CLOSED:
+                os.close(fd)
+                fd = _CLOSED
             _remove_partial(staging)
             raise
     finally:
+        # Already released on the success path, just before the rename.
+        if fd != _CLOSED:
+            os.close(fd)
         try:
             os.unlink(handle.name)
         except OSError:
