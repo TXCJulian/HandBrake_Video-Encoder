@@ -66,7 +66,7 @@ def available_encoders() -> list[str]:
     Never raises: a missing or unrunnable HandBrakeCLI yields an empty list,
     which ``/health`` reports as degraded rather than crashing the service.
     """
-    global _cache, _generation
+    global _cache
     with _lock:
         if _cache is not None:
             return list(_cache)
@@ -77,6 +77,7 @@ def available_encoders() -> list[str]:
             capture_output=True,
             text=True,
             timeout=20,
+            check=False,
         )
         output = (result.stdout or "") + (result.stderr or "")
         names = parse_encoder_list(output) if result.returncode == 0 else []
@@ -156,6 +157,7 @@ def encoder_presets(encoder: str) -> list[str]:
             text=True,
             errors="replace",
             timeout=20,
+            check=False,
         )
         # The list is written to stderr, not stdout -- confirmed against the
         # real binary, whose stdout is empty for this flag. Both are joined so

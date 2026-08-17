@@ -9,9 +9,7 @@ from app.job_manager import Job, JobStatus
 from app.main import app
 
 PRESET_DOC = {
-    "PresetList": [
-        {"PresetName": "P1", "VideoEncoder": "x264", "FileFormat": "av_mkv"}
-    ]
+    "PresetList": [{"PresetName": "P1", "VideoEncoder": "x264", "FileFormat": "av_mkv"}]
 }
 
 _TERMINAL = ("completed", "failed", "cancelled")
@@ -52,12 +50,18 @@ def client(tmp_path, monkeypatch):
 def test_health_reports_ok_with_roots_and_encoders(client, monkeypatch):
     c, _ = client
     monkeypatch.setattr(
-        main, "handbrake_info", lambda: {"available": True, "version": "1.9.2", "path": "/x"}
+        main,
+        "handbrake_info",
+        lambda: {"available": True, "version": "1.9.2", "path": "/x"},
     )
+    monkeypatch.setattr(main, "detect_gpu_name", lambda: "NVIDIA GeForce RTX 4070")
+    monkeypatch.setattr(encoders, "encoder_presets", lambda _e: ["medium", "slow"])
     body = c.get("/health").json()
     assert body["status"] == "ok"
     assert body["encoders"] == ["x264"]
     assert body["handbrake_version"] == "1.9.2"
+    assert body["gpu_name"] == "NVIDIA GeForce RTX 4070"
+    assert body["encoder_presets"] == {"x264": ["medium", "slow"]}
 
 
 def test_health_is_degraded_without_handbrake(client, monkeypatch):
@@ -70,13 +74,35 @@ def test_health_is_degraded_without_handbrake(client, monkeypatch):
     assert any("HandBrake" in r for r in body["reasons"])
 
 
+def test_health_remains_available_when_gpu_detection_fails(client, monkeypatch):
+    c, _ = client
+    monkeypatch.setattr(
+        main,
+        "handbrake_info",
+        lambda: {"available": True, "version": "1.9.2", "path": "/x"},
+    )
+    monkeypatch.setattr(
+        main,
+        "detect_gpu_name",
+        lambda: (_ for _ in ()).throw(RuntimeError("gpu probe failed")),
+    )
+
+    response = c.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["gpu_name"] is None
+
+
 def test_post_jobs_returns_202_with_a_job_id(client):
     c, media = client
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": PRESET_DOC,
-        "preset_name": "P1",
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": PRESET_DOC,
+            "preset_name": "P1",
+        },
+    )
     assert r.status_code == 202
     assert "job_id" in r.json()
 
@@ -85,31 +111,42 @@ def test_post_jobs_rejects_a_path_outside_the_roots(client, tmp_path):
     c, _ = client
     outside = tmp_path / "elsewhere.mkv"
     outside.write_text("x")
-    r = c.post("/jobs", json={
-        "source_path": str(outside), "preset_json": PRESET_DOC, "preset_name": "P1",
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(outside),
+            "preset_json": PRESET_DOC,
+            "preset_name": "P1",
+        },
+    )
     assert r.status_code == 403
     assert r.json()["code"] == "path_not_allowed"
 
 
 def test_post_jobs_reports_a_missing_source_distinctly(client, tmp_path, monkeypatch):
     c, media = client
-    r = c.post("/jobs", json={
-        "source_path": str(media / "absent.mkv"),
-        "preset_json": PRESET_DOC,
-        "preset_name": "P1",
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "absent.mkv"),
+            "preset_json": PRESET_DOC,
+            "preset_name": "P1",
+        },
+    )
     assert r.status_code == 404
     assert r.json()["code"] == "source_not_found_on_encoder"
 
 
 def test_post_jobs_rejects_an_unknown_preset_name(client):
     c, media = client
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": PRESET_DOC,
-        "preset_name": "Nope",
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": PRESET_DOC,
+            "preset_name": "Nope",
+        },
+    )
     assert r.status_code == 400
     assert r.json()["code"] == "preset_not_found"
 
@@ -117,11 +154,14 @@ def test_post_jobs_rejects_an_unknown_preset_name(client):
 def test_post_jobs_rejects_an_unavailable_encoder(client, monkeypatch):
     c, media = client
     monkeypatch.setattr(encoders, "available_encoders", lambda: ["x265"])
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": PRESET_DOC,
-        "preset_name": "P1",
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": PRESET_DOC,
+            "preset_name": "P1",
+        },
+    )
     assert r.status_code == 409
     assert r.json()["code"] == "encoder_unavailable"
     assert "x264" in r.json()["reason"]
@@ -146,11 +186,14 @@ def test_post_jobs_returns_503_when_the_manager_is_not_running(client):
     """
     c, media = client
     main.manager.shutdown()
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": PRESET_DOC,
-        "preset_name": "P1",
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": PRESET_DOC,
+            "preset_name": "P1",
+        },
+    )
     assert r.status_code == 503
     assert r.json()["code"] == "service_unavailable"
 
@@ -166,16 +209,21 @@ def test_post_jobs_rejects_an_unsupported_container(client):
             {"PresetName": "P1", "VideoEncoder": "x264", "FileFormat": "av_avi"}
         ]
     }
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": preset,
-        "preset_name": "P1",
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": preset,
+            "preset_name": "P1",
+        },
+    )
     assert r.status_code == 400
     assert r.json()["code"] == "preset_not_found"
 
 
-def test_post_jobs_returns_202_for_a_stored_job_that_is_already_failed(client, monkeypatch):
+def test_post_jobs_returns_202_for_a_stored_job_that_is_already_failed(
+    client, monkeypatch
+):
     """A STORED job that happens to already be FAILED (the worker claimed and
     failed it before the route re-reads it) must still get 202 with a
     pollable id - not the 503 reserved for jobs the manager never accepted.
@@ -206,11 +254,14 @@ def test_post_jobs_returns_202_for_a_stored_job_that_is_already_failed(client, m
         return job
 
     monkeypatch.setattr(main.manager, "submit", fake_submit)
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": PRESET_DOC,
-        "preset_name": "P1",
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": PRESET_DOC,
+            "preset_name": "P1",
+        },
+    )
     assert r.status_code == 202
     body = r.json()
     assert body["job_id"] == "stored-and-failed"
@@ -243,11 +294,14 @@ def test_post_jobs_returns_503_for_a_job_the_manager_never_stored(client, monkey
         return job  # deliberately not inserted into main.manager._jobs
 
     monkeypatch.setattr(main.manager, "submit", fake_submit)
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": PRESET_DOC,
-        "preset_name": "P1",
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": PRESET_DOC,
+            "preset_name": "P1",
+        },
+    )
     assert r.status_code == 503
     body = r.json()
     assert body["code"] == "service_unavailable"
@@ -267,22 +321,28 @@ def test_unknown_route_returns_a_top_level_code(client):
 
 def test_post_jobs_with_a_malformed_body_returns_422_invalid_request(client):
     c, media = client
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": PRESET_DOC,
-        # preset_name omitted
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": PRESET_DOC,
+            # preset_name omitted
+        },
+    )
     assert r.status_code == 422
     assert r.json()["code"] == "invalid_request"
 
 
 def test_get_returns_the_job_with_a_derived_output_path(client):
     c, media = client
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": PRESET_DOC,
-        "preset_name": "P1",
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": PRESET_DOC,
+            "preset_name": "P1",
+        },
+    )
     job_id = r.json()["job_id"]
 
     body = _poll_until_terminal(c, job_id)
@@ -298,11 +358,14 @@ def test_get_returns_the_job_with_a_derived_output_path(client):
 
 def test_delete_removes_an_existing_job(client):
     c, media = client
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": PRESET_DOC,
-        "preset_name": "P1",
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": PRESET_DOC,
+            "preset_name": "P1",
+        },
+    )
     job_id = r.json()["job_id"]
 
     assert c.delete(f"/jobs/{job_id}").status_code == 204
@@ -327,11 +390,14 @@ def _doc(encoder="x264", video_preset=None):
 
 
 def _post(c, media, doc):
-    return c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": doc,
-        "preset_name": "P1",
-    })
+    return c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": doc,
+            "preset_name": "P1",
+        },
+    )
 
 
 def test_post_jobs_rejects_a_speed_preset_the_encoder_does_not_accept(
@@ -399,12 +465,15 @@ def test_post_jobs_returns_503_queue_full_when_the_backlog_is_full(client, monke
     healthy here, just busy."""
     c, media = client
     monkeypatch.setattr(main.manager, "_max_queue", 1)
-    monkeypatch.setattr(main.manager, "_pending", 1)   # already at the limit
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": PRESET_DOC,
-        "preset_name": "P1",
-    })
+    monkeypatch.setattr(main.manager, "_pending", 1)  # already at the limit
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": PRESET_DOC,
+            "preset_name": "P1",
+        },
+    )
     assert r.status_code == 503
     assert r.json()["code"] == "queue_full"
     assert r.headers["Retry-After"] == "60"
@@ -415,11 +484,14 @@ def test_a_refused_submission_leaves_no_job_behind(client, monkeypatch):
     monkeypatch.setattr(main.manager, "_max_queue", 1)
     monkeypatch.setattr(main.manager, "_pending", 1)
     before = len(main.manager._jobs)
-    c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": PRESET_DOC,
-        "preset_name": "P1",
-    })
+    c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": PRESET_DOC,
+            "preset_name": "P1",
+        },
+    )
     assert len(main.manager._jobs) == before
 
 
@@ -427,22 +499,36 @@ def test_an_oversized_body_is_rejected_before_the_route_runs(client, monkeypatch
     """preset_json is an unbounded dict; without a cap it is parsed into memory
     before any path or encoder check can reject it."""
     c, media = client
-    huge = {"PresetList": [{"PresetName": "P1", "VideoEncoder": "x264",
-                            "FileFormat": "av_mkv", "pad": "x" * 2_000_000}]}
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": huge,
-        "preset_name": "P1",
-    })
+    huge = {
+        "PresetList": [
+            {
+                "PresetName": "P1",
+                "VideoEncoder": "x264",
+                "FileFormat": "av_mkv",
+                "pad": "x" * 2_000_000,
+            }
+        ]
+    }
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": huge,
+            "preset_name": "P1",
+        },
+    )
     assert r.status_code == 413
     assert r.json()["code"] == "request_too_large"
 
 
 def test_a_normal_body_is_unaffected(client):
     c, media = client
-    r = c.post("/jobs", json={
-        "source_path": str(media / "movie.mkv"),
-        "preset_json": PRESET_DOC,
-        "preset_name": "P1",
-    })
+    r = c.post(
+        "/jobs",
+        json={
+            "source_path": str(media / "movie.mkv"),
+            "preset_json": PRESET_DOC,
+            "preset_name": "P1",
+        },
+    )
     assert r.status_code == 202

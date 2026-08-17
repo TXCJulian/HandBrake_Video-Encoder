@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as _HTTPException
 
 from app import config, encoders
+from app.gpu import detect_gpu_name
 from app.handbrake_runner import handbrake_info
 from app.job_manager import Job, QueueFull, manager
 from app.limits import BodySizeLimitMiddleware
@@ -118,6 +119,9 @@ def health() -> dict:
     """
     info = handbrake_info()
     available = encoders.available_encoders()
+    encoder_presets = {
+        encoder: encoders.encoder_presets(encoder) for encoder in available
+    }
     reasons: list[str] = []
     if not info["available"]:
         reasons.append("HandBrakeCLI is not available or not runnable on PATH")
@@ -125,12 +129,19 @@ def health() -> dict:
         reasons.append("HandBrakeCLI reported no usable encoders")
     if not config.ALLOWED_ROOTS:
         reasons.append("ENCODER_ALLOWED_ROOTS is empty; every request will be rejected")
+    try:
+        gpu_name = detect_gpu_name()
+    except Exception:
+        logger.exception("GPU detection failed; health remains available")
+        gpu_name = None
     return {
         "status": "degraded" if reasons else "ok",
         "reasons": reasons,
         "handbrake_available": info["available"],
         "handbrake_version": info["version"],
         "encoders": available,
+        "encoder_presets": encoder_presets,
+        "gpu_name": gpu_name,
         "allowed_roots": config.ALLOWED_ROOTS,
         "workers": config.WORKERS,
     }

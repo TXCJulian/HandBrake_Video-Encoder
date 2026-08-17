@@ -84,6 +84,7 @@ docker compose exec handbrake-encoder vainfo
 | `ENCODER_JOB_TTL` | `3600` | Completed-job eviction, in seconds. |
 | `ENCODER_MAX_QUEUE` | `100` | Jobs allowed to wait for a worker before `POST /jobs` refuses with `503 queue_full`. Bounds the backlog, not running jobs (already capped by `ENCODER_WORKERS`). Set `0` to disable. |
 | `ENCODER_MAX_BODY_BYTES` | `1000000` | Largest accepted request body. Real preset documents are a few KB. |
+| `ENCODER_GPU_NAME` | *(auto-detected)* | Optional display name for the GPU shown by `/health`; useful when the container cannot expose `nvidia-smi` or PCI information. |
 | `HANDBRAKE_BIN` | `HandBrakeCLI` | Path to the binary. |
 | `PORT` | `3335` | HTTP port inside the container. |
 | `PUID` / `PGID` | `1000` | User the process runs as (applied by `entrypoint.sh`, not read by the app itself). Match your media share's owner. |
@@ -93,7 +94,7 @@ docker compose exec handbrake-encoder vainfo
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Status, HandBrake version, probed encoders, allowed roots. |
+| `GET` | `/health` | Status, HandBrake version, probed encoders and their supported speed presets, best-effort GPU model, allowed roots. |
 | `POST` | `/jobs` | Queue an encode. `202` with `{"job_id": "..."}`. |
 | `GET` | `/jobs/{id}` | Status, progress, `output_path`, encoder used, error. |
 | `DELETE` | `/jobs/{id}` | Cancel if running, then delete. |
