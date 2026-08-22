@@ -8,11 +8,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libfontconfig-dev libfreetype-dev libfribidi-dev libharfbuzz-dev \
       libjansson-dev liblzma-dev libmp3lame-dev libnuma-dev libogg-dev \
       libopus-dev libsamplerate0-dev libspeex-dev libtheora-dev libtool \
-      libtool-bin libturbojpeg0-dev libvorbis-dev libx264-dev libxml2-dev \
-      libvpx-dev m4 make meson nasm ninja-build patch pkg-config python3 \
-      tar zlib1g-dev ca-certificates \
+      libtool-bin libturbojpeg0-dev libvorbis-dev libx11-dev libx264-dev \
+      libxml2-dev libvpx-dev m4 make meson nasm ninja-build patch pkg-config \
+      python3 tar zlib1g-dev ca-certificates \
       libva-dev libdrm-dev \
+      curl clang llvm libssl-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# libdovi (Dolby Vision RPU parsing/injection) is a Rust crate built through
+# cargo-c. HandBrake's ./configure treats it as optional: with no Rust
+# toolchain present it just skips it and reports a successful configure, so
+# the build "works" but silently drops DoVi metadata from every x265 encode.
+# libssl-dev above is cargo-c's own build-time dep (TLS for crates.io);
+# clang/llvm are HandBrake's own NVENC/NVDEC requirement, not cargo-c's,
+# though clang incidentally also covers cargo-c's bindgen use.
+ENV RUSTUP_HOME=/opt/rust CARGO_HOME=/opt/rust PATH="/opt/rust/bin:$PATH"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain stable \
+    && cargo install cargo-c --locked
 
 RUN git clone --depth 1 --branch ${HANDBRAKE_VERSION} \
       https://github.com/HandBrake/HandBrake.git /src
