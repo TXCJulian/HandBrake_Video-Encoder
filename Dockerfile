@@ -33,9 +33,12 @@ WORKDIR /src
 
 # NVENC/QSV/VCE are amd64-only. On arm64 the build falls back to the CPU
 # encoders (x264/x265), which is the only thing that hardware can do anyway.
+# NVDEC needs its own flag: HandBrake's configure defaults --enable-nvenc to
+# on but --enable-nvdec to off, so it must be requested explicitly or the
+# build reports "nvdec: is not compiled into this build" despite NVENC working.
 RUN set -eux; \
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
-      GPU_FLAGS="--enable-nvenc --enable-qsv --enable-vce"; \
+      GPU_FLAGS="--enable-nvenc --enable-nvdec --enable-qsv --enable-vce"; \
     else \
       GPU_FLAGS=""; \
     fi; \
