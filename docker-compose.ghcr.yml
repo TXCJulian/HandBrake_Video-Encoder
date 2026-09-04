@@ -39,7 +39,7 @@ services:
       ENCODER_JOB_TTL: "3600"
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
-      UMASK: "022"
+      UMASK: "${UMASK:-022}"
 
     volumes:
       - ${ENCODER_HOST_MEDIA:-./media}:${ENCODER_ROOT:-/media1}

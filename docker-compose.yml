@@ -13,6 +13,6 @@ services:
       ENCODER_JOB_TTL: "3600"
       PUID: "1000"
       PGID: "1000"
-      UMASK: "022"
+      UMASK: "${UMASK:-022}"
     volumes:
       - /mnt/Media1:/media1
