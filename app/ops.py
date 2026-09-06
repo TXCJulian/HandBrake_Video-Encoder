@@ -80,7 +80,10 @@ def run_encode_job(job: Job, req: EncodeRequest) -> None:
         fd = os.open(
             staging,
             os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
-            0o644,
+            # Let the process umask choose between the default 0644 (022)
+            # and shared-group 0664 (002). A requested 0644 mode could never
+            # gain group-write because umask only removes permission bits.
+            0o666,
         )
     except OSError as exc:
         raise PathNotAllowed(

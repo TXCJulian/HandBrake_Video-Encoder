@@ -88,7 +88,9 @@ docker compose exec handbrake-encoder vainfo
 | `HANDBRAKE_BIN` | `HandBrakeCLI` | Path to the binary. |
 | `PORT` | `3335` | HTTP port inside the container. |
 | `PUID` / `PGID` | `1000` | User the process runs as (applied by `entrypoint.sh`, not read by the app itself). Match your media share's owner. |
-| `UMASK` | `022` | Permissions for written output (applied by `entrypoint.sh`) — must stay readable by Jellyfin. |
+| `UMASK` | `022` | Creation mask applied by `entrypoint.sh`. Use `002` with a shared group/setgid NAS so encoder outputs are group-writable (`0664` files, `0775` directories). |
+
+For the shared-media model, set `PGID=2000` and `UMASK=002`; `entrypoint.sh` applies the mask before dropping privileges, and the encoder process inherits it.
 
 ## API
 

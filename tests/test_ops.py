@@ -54,6 +54,34 @@ def test_sets_output_path_and_encoder_used(source, monkeypatch):
     assert job.encoder_used == "x264"
 
 
+def test_staging_file_requests_group_write_for_umask_control(source, monkeypatch):
+    """The process umask must be able to produce shared-group 0664 output.
+
+    Requesting 0644 here would permanently omit group-write: umask can only
+    remove permission bits, never add them. 0666 lets the configured mask
+    select 0644 (022) or 0664 (002) as documented.
+    """
+    real_open = ops.os.open
+    requested_modes = []
+
+    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+        if os.path.basename(path).startswith(".hbenc-"):
+            requested_modes.append(mode)
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(ops.os, "open", recording_open)
+    monkeypatch.setattr(ops, "run_encode", lambda *a, **k: None)
+
+    job = Job(id="abc123")
+    ops.run_encode_job(job, EncodeRequest(
+        source_path=str(source), preset_json=PRESET_DOC, preset_name="P1"
+    ))
+
+    assert requested_modes == [0o666]
+
+
 def test_removes_the_partial_output_when_the_encode_fails(source, monkeypatch):
     def fail(cmd, *, on_progress, cancel_event, timeout=0):
         dst = cmd[cmd.index("-o") + 1]
