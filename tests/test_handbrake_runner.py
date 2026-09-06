@@ -128,6 +128,34 @@ def test_parses_real_handbrake_output_verbatim(fake_handbrake):
     assert seen == [pytest.approx(98.000001907348633)]
 
 
+def test_reports_eta_and_clears_it_outside_working(fake_handbrake):
+    exe = fake_handbrake('''
+        print('Progress: {"State":"WORKING","Working":{"Progress":0.4,"ETASeconds":120,"Hours":0}}', flush=True)
+        print('Progress: {"State":"WORKING","Working":{"Progress":0.5,"ETASeconds":0,"Hours":-1}}', flush=True)
+        print('Progress: {"State":"WORKING","Working":{"Progress":0.8,"ETASeconds":30,"Hours":0}}', flush=True)
+        print('Progress: {"State":"MUXING"}', flush=True)
+    ''')
+    seen = []
+    run_encode(exe, on_progress=lambda _p: None, on_eta=seen.append,
+               cancel_event=threading.Event())
+    assert seen == [120, None, 30, None]
+
+
+@pytest.mark.parametrize("working", [
+    {"ETASeconds": -1}, {"ETASeconds": "120"}, {"ETASeconds": True},
+    {"ETASeconds": float("nan")}, {"ETASeconds": float("inf")},
+    {"ETASeconds": 120, "Pass": 1, "PassCount": 2},
+])
+def test_does_not_report_invalid_or_intermediate_pass_eta(fake_handbrake, working):
+    import json
+    record = json.dumps({"State": "WORKING", "Working": working})
+    exe = fake_handbrake(f"print({record!r}, flush=True)")
+    seen = []
+    run_encode(exe, on_progress=lambda _p: None, on_eta=seen.append,
+               cancel_event=threading.Event())
+    assert seen == [None]
+
+
 def test_reports_progress_scaled_to_percent(fake_handbrake):
     exe = fake_handbrake(
         """

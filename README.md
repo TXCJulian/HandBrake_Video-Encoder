@@ -98,8 +98,15 @@ For the shared-media model, set `PGID=2000` and `UMASK=002`; `entrypoint.sh` app
 | --- | --- | --- |
 | `GET` | `/health` | Status, HandBrake version, probed encoders and their supported speed presets, best-effort GPU model, allowed roots. |
 | `POST` | `/jobs` | Queue an encode. `202` with `{"job_id": "..."}`. |
-| `GET` | `/jobs/{id}` | Status, progress, `output_path`, encoder used, error. |
+| `GET` | `/jobs/{id}` | Status, progress, `eta_seconds`, `output_path`, encoder used, error. |
 | `DELETE` | `/jobs/{id}` | Cancel if running, then delete. |
+
+`eta_seconds` reports HandBrake's estimated remaining encoding time for a running
+job. It is `null` while an estimate is unavailable and for queued or finished
+jobs, or after 30 seconds without fresh telemetry. For multi-pass encodes it
+becomes available during the final pass, because
+HandBrake reports time remaining for the current pass. Final file publication is
+not included in the estimate.
 
 `POST /jobs` takes `{source_path, preset_json, preset_name}`. **No output path
 and no HandBrake arguments are accepted.** The output path is derived as

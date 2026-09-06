@@ -28,11 +28,12 @@ def source(tmp_path, monkeypatch):
 def test_writes_the_preset_to_a_temp_file_and_removes_it(source, monkeypatch):
     seen: dict = {}
 
-    def fake_run(cmd, *, on_progress, cancel_event, timeout=0):
+    def fake_run(cmd, *, on_progress, cancel_event, timeout=0, on_eta=None):
         preset_file = cmd[cmd.index("--preset-import-file") + 1]
         seen["path"] = preset_file
         seen["content"] = json.loads(open(preset_file).read())
         on_progress(50.0)
+        on_eta(120)
 
     monkeypatch.setattr(ops, "run_encode", fake_run)
     job = Job(id="abc123")
@@ -42,6 +43,7 @@ def test_writes_the_preset_to_a_temp_file_and_removes_it(source, monkeypatch):
     assert seen["content"] == PRESET_DOC
     assert not os.path.exists(seen["path"]), "temp preset file must be cleaned up"
     assert job.progress == 50.0
+    assert job.eta_seconds == 120
 
 
 def test_sets_output_path_and_encoder_used(source, monkeypatch):
@@ -83,7 +85,7 @@ def test_staging_file_requests_group_write_for_umask_control(source, monkeypatch
 
 
 def test_removes_the_partial_output_when_the_encode_fails(source, monkeypatch):
-    def fail(cmd, *, on_progress, cancel_event, timeout=0):
+    def fail(cmd, *, on_progress, cancel_event, timeout=0, on_eta=None):
         dst = cmd[cmd.index("-o") + 1]
         open(dst, "w").write("partial")
         raise ops.HandBrakeError("boom")
@@ -150,7 +152,7 @@ def test_rejects_a_job_id_that_makes_the_output_collide_with_the_source(source, 
 
 
 def _encode_writing(content="encoded"):
-    def _run(cmd, *, on_progress, cancel_event, timeout=0):
+    def _run(cmd, *, on_progress, cancel_event, timeout=0, on_eta=None):
         dst = cmd[cmd.index("-o") + 1]
         with open(dst, "w") as fh:
             fh.write(content)
@@ -162,7 +164,7 @@ def test_encode_writes_to_an_unpredictable_staging_name(source, monkeypatch):
     job id must not be enough to pre-place a symlink there."""
     seen = {}
 
-    def _run(cmd, *, on_progress, cancel_event, timeout=0):
+    def _run(cmd, *, on_progress, cancel_event, timeout=0, on_eta=None):
         seen["dst"] = cmd[cmd.index("-o") + 1]
         open(seen["dst"], "w").write("encoded")
 
@@ -248,7 +250,7 @@ def test_a_swapped_staging_file_is_detected(source, monkeypatch):
     monkeypatch.setattr(ops.secrets, "token_hex", lambda _n: "fixedtoken")
     staged = source.parent / ".hbenc-abc123-fixedtoken.mkv"
 
-    def _swap(cmd, *, on_progress, cancel_event, timeout=0):
+    def _swap(cmd, *, on_progress, cancel_event, timeout=0, on_eta=None):
         os.remove(str(staged))          # attacker unlinks our claimed file
         open(str(staged), "w").write("attacker's file")
 
@@ -262,7 +264,7 @@ def test_a_swapped_staging_file_is_detected(source, monkeypatch):
 
 
 def test_a_failed_encode_leaves_no_staging_or_published_file(source, monkeypatch):
-    def fail(cmd, *, on_progress, cancel_event, timeout=0):
+    def fail(cmd, *, on_progress, cancel_event, timeout=0, on_eta=None):
         open(cmd[cmd.index("-o") + 1], "w").write("partial")
         raise ops.HandBrakeError("boom")
 

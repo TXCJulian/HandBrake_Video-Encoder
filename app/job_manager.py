@@ -28,6 +28,7 @@ class JobStatus(str, Enum):
 
 
 _TERMINAL = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+_ETA_MAX_AGE_SECONDS = 30
 
 
 class QueueFull(RuntimeError):
@@ -59,6 +60,8 @@ class Job:
     id: str
     status: JobStatus = JobStatus.QUEUED
     progress: float = 0.0
+    eta_seconds: int | None = None
+    eta_updated_at: float | None = None
     message: str = ""
     error: str | None = None
     output_path: str | None = None
@@ -67,6 +70,10 @@ class Job:
     finished_at: float | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
+    def set_eta(self, seconds: int | None) -> None:
+        self.eta_seconds = seconds
+        self.eta_updated_at = time.monotonic() if seconds is not None else None
+
     def to_dict(self) -> dict:
         """Client-facing view.
 
@@ -74,10 +81,18 @@ class Job:
         needs it to perform the swap, and it is derived here rather than
         supplied by the caller.
         """
+        eta = self.eta_seconds
+        if (
+            self.status != JobStatus.RUNNING
+            or self.eta_updated_at is None
+            or time.monotonic() - self.eta_updated_at > _ETA_MAX_AGE_SECONDS
+        ):
+            eta = None
         return {
             "job_id": self.id,
             "status": self.status.value,
             "progress": round(self.progress, 1),
+            "eta_seconds": eta,
             "message": self.message,
             "error": self.error,
             "output_path": self.output_path,

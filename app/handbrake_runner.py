@@ -16,6 +16,7 @@ Media_Transcoder, for the same reasons:
 
 import functools
 import json
+import math
 import logging
 import re
 import shutil
@@ -131,6 +132,27 @@ def parse_progress_objects(chunk: str) -> list[dict]:
     return objects
 
 
+def _remaining_seconds(obj: dict) -> int | None:
+    working = obj.get("Working")
+    if obj.get("State") != "WORKING" or not isinstance(working, dict):
+        return None
+    eta = working.get("ETASeconds")
+    if (isinstance(eta, bool) or not isinstance(eta, (int, float))
+            or not math.isfinite(eta) or eta < 0):
+        return None
+    # HandBrake uses Hours=-1 while its rate estimate is warming up,
+    # even when ETASeconds is zero or still carries a previous value.
+    if working.get("Hours") == -1:
+        return None
+    # ETA describes the current pass; only the final pass estimates the
+    # remaining time for the whole encode.
+    current_pass, pass_count = working.get("Pass"), working.get("PassCount")
+    if (isinstance(current_pass, (int, float))
+            and isinstance(pass_count, (int, float)) and current_pass < pass_count):
+        return None
+    return int(eta)
+
+
 def _watch_cancel(proc: "subprocess.Popen", cancel_event: threading.Event) -> None:
     """Kill *proc* once *cancel_event* fires, unless it finishes on its own.
 
@@ -156,6 +178,7 @@ def run_encode(
     on_progress: Callable[[float], None],
     cancel_event: threading.Event,
     timeout: float = 14400,
+    on_eta: Callable[[int | None], None] | None = None,
 ) -> None:
     """Run *cmd*, reporting 0-100 progress and honouring cancellation.
 
@@ -213,6 +236,11 @@ def run_encode(
                         buffer = ""
                     continue
                 for obj in objects:
+                    if on_eta is not None and "State" in obj:
+                        try:
+                            on_eta(_remaining_seconds(obj))
+                        except Exception:  # ETA reporting cannot fail an encode.
+                            logger.warning("on_eta callback raised; ignoring", exc_info=True)
                     working = obj.get("Working")
                     if not isinstance(working, dict):
                         continue
