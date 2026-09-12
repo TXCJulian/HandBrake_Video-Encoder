@@ -270,3 +270,22 @@ def test_shutdown_still_completes_with_a_full_backlog():
     m.submit(lambda _j: None)
     m.submit(lambda _j: None)
     m.shutdown()   # must return, not block
+
+
+@pytest.mark.parametrize("status", list(JobStatus))
+def test_eta_is_only_exposed_for_running_jobs(status):
+    job = Job(id="eta", status=status)
+    job.set_eta(120)
+    assert job.to_dict()["eta_seconds"] == (120 if status == JobStatus.RUNNING else None)
+
+
+def test_eta_expires_if_handbrake_stops_reporting(monkeypatch):
+    monkeypatch.setattr(time, "monotonic", lambda: 100)
+    job = Job(id="eta", status=JobStatus.RUNNING)
+    job.set_eta(120)
+    monkeypatch.setattr(time, "monotonic", lambda: 105)
+    assert job.to_dict()["eta_seconds"] == 120
+    monkeypatch.setattr(time, "monotonic", lambda: 160)
+    assert job.to_dict()["eta_seconds"] is None
+    job.set_eta(80)
+    assert job.to_dict()["eta_seconds"] == 80

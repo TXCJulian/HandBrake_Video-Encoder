@@ -119,6 +119,7 @@ def run_encode_job(job: Job, req: EncodeRequest) -> None:
             run_encode(
                 cmd,
                 on_progress=lambda pct: setattr(job, "progress", pct),
+                on_eta=job.set_eta,
                 cancel_event=job.cancel_event,
             )
             # samestat against the still-open descriptor, not against a stat
