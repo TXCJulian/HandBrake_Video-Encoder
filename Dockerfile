@@ -45,14 +45,10 @@ RUN set -eux; \
     ./configure --launch-jobs="$(nproc)" --launch --disable-gtk --enable-libdovi ${GPU_FLAGS}
 
 # ---- runtime stage ---------------------------------------------------------
-# Ubuntu 26.04, the SAME release as the build stage. This is load-bearing, not
-# stylistic. Verified with objdump/ldd against the Task 1 spike binary:
-#   * it requires GLIBC_2.38, and Debian bookworm ships 2.36 — the binary
-#     cannot exec there at all;
-#   * it needs libvpx.so.9, and bookworm provides only libvpx.so.7;
-#   * it links libva.so.2 / libva-drm.so.2 / libdrm.so.2, which must be present
-#     at RUNTIME too, not merely as -dev packages in the build stage.
-# Build and runtime bases must stay on the same distro release.
+# Keep the runtime base on the same Ubuntu release as the build stage. The CLI
+# links against system libraries from the build stage, so runtime packages need
+# to provide the matching ABI. Recheck the runtime package list when changing
+# either base image.
 FROM ubuntu:26.04
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -70,12 +66,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # a driver behind them /usr/lib/x86_64-linux-gnu/dri is empty and every hardware
 # encoder fails at init even with /dev/dri passed through and a working GPU.
 #
-# The Intel media stack comes from Intel's PPA, NOT Ubuntu's archive. Noble
-# ships intel-media-va-driver-non-free 24.1.0 and libmfx-gen1.2 23.2.3, both of
-# which predate Battlemage (Arc B580, launched after they were cut), so QSV
-# simply would not come up on that card. The PPA carries 26.2.2. This is the
-# same source the sibling Whisper_Lyric-Transcriber service had to adopt for
-# Battlemage (e09d81e), there for the compute stack rather than the media one.
+# Resolute's archive provides intel-media-va-driver-non-free and
+# libmfx-gen1.2 at 26.1.2. Ubuntu 26.04 supports Battlemage with that stack;
+# this image opts into Intel's PPA for its newer 26.2.2 media userspace.
+# The sibling Whisper_Lyric-Transcriber service uses the same PPA for its
+# compute stack.
 #   https://dgpu-docs.intel.com/installation-guides/installing-packages-from-the-intel-ppa.html
 #
 #   intel-media-va-driver-non-free  iHD VA driver (QSV). The non-free build
