@@ -8,6 +8,11 @@ on:
     branches:
       - master
   workflow_dispatch:
+  # Weekly rebuild so the published image picks up Ubuntu security updates
+  # (base image and apt packages) even when nothing in the repo changed.
+  # Scheduled runs always use the default branch, so they publish :latest.
+  schedule:
+    - cron: '0 4 * * 1'   # Mondays 04:00 UTC
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -31,8 +36,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          # Matches the runtime image: Ubuntu 24.04 ships Python 3.12.
-          python-version: '3.12'
+          # Matches the runtime image: Ubuntu 26.04 ships Python 3.14.
+          python-version: '3.14'
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
@@ -76,8 +81,15 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: handbrake-video-encoder:ci
+          # Always resolve the newest ubuntu:26.04 rather than a cached digest.
+          pull: true
           # HandBrake is compiled from source, which is ~30-60 min cold. Without
-          # this cache every push would pay that again.
+          # this cache every push would pay that again. The weekly scheduled
+          # run skips it on purpose: cached apt layers would otherwise keep
+          # shipping last week's packages, defeating the security rebuild.
+          # cache-to still runs, so the fresh layers seed the cache for the
+          # publish step below and for the next push.
+          no-cache: ${{ github.event_name == 'schedule' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

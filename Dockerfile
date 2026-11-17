@@ -54,9 +54,9 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libass9 libjansson4 libmp3lame0 libnuma1 libogg0 libopus0 \
-      libsamplerate0 libspeex1 libtheora1 libtheoradec2 libtheoraenc2 \
+      libsamplerate0 libspeex1 libtheoradec2 libtheoraenc2 \
       libturbojpeg0 libvorbis0a \
-      libvorbisenc2 libx264-165 libxml2-16 libvpx12 libfribidi0 libharfbuzz0b \
+      libvorbisenc2 libx264-165 libvpx12 libfribidi0 libharfbuzz0b \
       libfontconfig1 libfreetype6 \
       libva2 libva-drm2 libdrm2 \
       util-linux python3 python3-venv ca-certificates \
