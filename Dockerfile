@@ -1,7 +1,7 @@
 # ---- build stage -----------------------------------------------------------
-FROM ubuntu:24.04 AS build
+FROM ubuntu:26.04 AS build
 ARG DEBIAN_FRONTEND=noninteractive
-ARG HANDBRAKE_VERSION=1.9.2
+ARG HANDBRAKE_VERSION=1.11.2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       autoconf automake build-essential cmake git libass-dev libbz2-dev \
@@ -16,9 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # libdovi (Dolby Vision RPU parsing/injection) is a Rust crate built through
-# cargo-c. HandBrake's ./configure treats it as optional: with no Rust
-# toolchain present it just skips it and reports a successful configure, so
-# the build "works" but silently drops DoVi metadata from every x265 encode.
+# cargo-c. HandBrake treats it as optional, so --enable-libdovi below is
+# required; without it, the build can succeed while silently dropping DoVi
+# metadata from x265 encodes.
 # libssl-dev above is cargo-c's own build-time dep (TLS for crates.io);
 # clang/llvm are HandBrake's own NVENC/NVDEC requirement, not cargo-c's,
 # though clang incidentally also covers cargo-c's bindgen use.
@@ -42,24 +42,21 @@ RUN set -eux; \
     else \
       GPU_FLAGS=""; \
     fi; \
-    ./configure --launch-jobs="$(nproc)" --launch --disable-gtk ${GPU_FLAGS}
+    ./configure --launch-jobs="$(nproc)" --launch --disable-gtk --enable-libdovi ${GPU_FLAGS}
 
 # ---- runtime stage ---------------------------------------------------------
-# Ubuntu 24.04, the SAME release as the build stage. This is load-bearing, not
-# stylistic. Verified with objdump/ldd against the Task 1 spike binary:
-#   * it requires GLIBC_2.38, and Debian bookworm ships 2.36 — the binary
-#     cannot exec there at all;
-#   * it needs libvpx.so.9, and bookworm provides only libvpx.so.7;
-#   * it links libva.so.2 / libva-drm.so.2 / libdrm.so.2, which must be present
-#     at RUNTIME too, not merely as -dev packages in the build stage.
-# Build and runtime bases must stay on the same distro release.
-FROM ubuntu:24.04
+# Keep the runtime base on the same Ubuntu release as the build stage. The CLI
+# links against system libraries from the build stage, so runtime packages need
+# to provide the matching ABI. Recheck the runtime package list when changing
+# either base image.
+FROM ubuntu:26.04
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libass9 libjansson4 libmp3lame0 libnuma1 libogg0 libopus0 \
-      libsamplerate0 libspeex1 libtheora0 libturbojpeg libvorbis0a \
-      libvorbisenc2 libx264-164 libxml2 libvpx9 libfribidi0 libharfbuzz0b \
+      libsamplerate0 libspeex1 libtheoradec2 libtheoraenc2 \
+      libturbojpeg0 libvorbis0a \
+      libvorbisenc2 libx264-165 libvpx12 libfribidi0 libharfbuzz0b \
       libfontconfig1 libfreetype6 \
       libva2 libva-drm2 libdrm2 \
       util-linux python3 python3-venv ca-certificates \
@@ -69,12 +66,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # a driver behind them /usr/lib/x86_64-linux-gnu/dri is empty and every hardware
 # encoder fails at init even with /dev/dri passed through and a working GPU.
 #
-# The Intel media stack comes from Intel's PPA, NOT Ubuntu's archive. Noble
-# ships intel-media-va-driver-non-free 24.1.0 and libmfx-gen1.2 23.2.3, both of
-# which predate Battlemage (Arc B580, launched after they were cut), so QSV
-# simply would not come up on that card. The PPA carries 26.2.2. This is the
-# same source the sibling Whisper_Lyric-Transcriber service had to adopt for
-# Battlemage (e09d81e), there for the compute stack rather than the media one.
+# Resolute's archive provides intel-media-va-driver-non-free and
+# libmfx-gen1.2 at 26.1.2. Ubuntu 26.04 supports Battlemage with that stack;
+# this image opts into Intel's PPA for its newer 26.2.2 media userspace.
+# The sibling Whisper_Lyric-Transcriber service uses the same PPA for its
+# compute stack.
 #   https://dgpu-docs.intel.com/installation-guides/installing-packages-from-the-intel-ppa.html
 #
 #   intel-media-va-driver-non-free  iHD VA driver (QSV). The non-free build
@@ -83,9 +79,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #                                   implementation for Gen12+ / Arc / Battlemage.
 #   libvpl2                         oneVPL dispatcher; it only *finds* a runtime,
 #                                   so it is not sufficient on its own.
-#   libmfx1                         Legacy Media SDK runtime for Gen8-11. Stays
-#                                   on the archive version; the PPA does not
-#                                   carry it and those parts are long stable.
+#   Ubuntu 26.04 no longer publishes libmfx1, the legacy Media SDK runtime
+#   for Gen8-11. This image therefore targets the oneVPL runtime on Gen12+
+#   Intel GPUs, including Arc and Battlemage.
 #   mesa-va-drivers                 radeonsi VAAPI, for AMD decode/VAAPI encode.
 #   vainfo                          Diagnostics. Tiny, and the first thing worth
 #                                   running when a GPU host reports no encoders.
@@ -103,7 +99,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && add-apt-repository -y ppa:kobuk-team/intel-graphics \
     && apt-get update && apt-get install -y --no-install-recommends \
       intel-media-va-driver-non-free libmfx-gen1.2 libvpl2 \
-      libmfx1 mesa-va-drivers vainfo \
+      mesa-va-drivers vainfo \
     && apt-get purge -y software-properties-common \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
@@ -121,7 +117,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ app/
 COPY entrypoint.sh /entrypoint.sh
 
-# Ubuntu 24.04 (unlike 22.04 and Debian) ships a stock `ubuntu` account holding
+# Ubuntu 26.04 (unlike 22.04 and Debian) ships a stock `ubuntu` account holding
 # UID/GID 1000, which must go before appuser can take those ids.
 #
 # The build-time symptom is just "groupadd: GID '1000' already exists". The
